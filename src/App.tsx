@@ -43,8 +43,7 @@ declare global {
   }
 }
 
-// INTERFACCIA TOAST (MODIFICATA PER EVITARE ERRORI DI BUILD)
-// Il '?' dopo type rende la proprietà opzionale.
+// INTERFACCIA TOAST (CORRETTA: 'type' è opzionale)
 interface ToastState {
   visible: boolean;
   message: string;
@@ -459,7 +458,7 @@ const CHECKLIST_ITEMS = [
   { id: "assicurazione", label: "Certificato Assicurazione" },
   { id: "card", label: "Carta Carburante" },
   { id: "telepass", label: "Dispositivo Telepass" },
-  { id: "manuale", label: "Manuale Uso e Manutenzione" },
+  { id: "manuale", label: "Manuale Uso" },
   { id: "giubbino", label: "Giubbino Catarifrangente" },
   { id: "triangolo", label: "Triangolo" },
 ];
@@ -483,7 +482,6 @@ const App = () => {
   const [photos, setPhotos] = useState<any[]>([]);
   const [signature, setSignature] = useState<string | null>(null);
 
-  // NOTA: 'type' ora è opzionale nella definizione dello stato, così typescript non si blocca se manca.
   const [toast, setToast] = useState<ToastState>({
     visible: false,
     message: "",
@@ -1512,7 +1510,7 @@ const App = () => {
           <div className="bg-orange-600 w-10 h-10 rounded flex items-center justify-center font-bold">
             R
           </div>
-          <h1 className="text-xl font-bold">Renco Fleet Management</h1>
+          <h1 className="text-xl font-bold">Renco.Fleet-Management</h1>
         </div>
       </header>
       <div className="max-w-5xl mx-auto px-4 mt-6">
