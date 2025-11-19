@@ -1512,7 +1512,7 @@ const App = () => {
           <div className="bg-orange-600 w-10 h-10 rounded flex items-center justify-center font-bold">
             R
           </div>
-          <h1 className="text-xl font-bold">Renco.Fleet-Management</h1>
+          <h1 className="text-xl font-bold">Renco Fleet Management</h1>
         </div>
       </header>
       <div className="max-w-5xl mx-auto px-4 mt-6">
