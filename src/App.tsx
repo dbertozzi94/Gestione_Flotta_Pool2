@@ -46,7 +46,7 @@ declare global {
 }
 
 // --- SICUREZZA ---
-const APP_PIN = "050502"; // <--- CAMBIA QUESTO PIN CON QUELLO CHE PREFERISCI
+const APP_PIN = "Renco2025!"; // <--- CAMBIA QUESTO PIN CON QUELLO CHE PREFERISCI
 
 // INTERFACCIA TOAST
 interface ToastState {
@@ -1010,8 +1010,6 @@ const App = () => {
         <form onSubmit={handleLogin} className="space-y-4">
           <input
             type="password"
-            pattern="[0-9]*"
-            inputMode="numeric"
             className="w-full text-center text-2xl tracking-widest p-3 border rounded-lg focus:ring-2 focus:ring-orange-500 outline-none font-mono"
             placeholder="PIN"
             value={pinInput}
