@@ -46,7 +46,7 @@ declare global {
 }
 
 // --- SICUREZZA ---
-const APP_PIN = "05052002"; // <--- CAMBIA QUESTO PIN CON QUELLO CHE PREFERISCI
+const APP_PIN = "050502"; // <--- CAMBIA QUESTO PIN CON QUELLO CHE PREFERISCI
 
 // INTERFACCIA TOAST
 interface ToastState {
