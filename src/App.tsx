@@ -1538,7 +1538,7 @@ const App = () => {
                   label="Firma"
                   disclaimer={
                     isCheckout
-                      ? "In caso di da si riserva il diritto di addebitare il costo di riparazione al dipendente, nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
+                      ? "In caso di danneggiamento la società si riserva il diritto di addebitare il costo di riparazione al dipendente, nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
                       : null
                   }
                 />
