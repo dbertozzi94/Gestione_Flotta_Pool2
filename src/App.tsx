@@ -17,6 +17,8 @@ import {
   Search,
   FileDown,
   Pencil,
+  Lock,
+  LogIn,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
 
@@ -43,7 +45,10 @@ declare global {
   }
 }
 
-// INTERFACCIA TOAST (CORRETTA: 'type' è opzionale)
+// --- SICUREZZA ---
+const APP_PIN = "Renco2025!"; // <--- CAMBIA QUESTO PIN CON QUELLO CHE PREFERISCI
+
+// INTERFACCIA TOAST
 interface ToastState {
   visible: boolean;
   message: string;
@@ -466,6 +471,10 @@ const CHECKLIST_ITEMS = [
 const FUEL_LEVELS = ["Riserva", "1/4", "1/2", "3/4", "Pieno"];
 
 const App = () => {
+  // --- STATO AUTENTICAZIONE ---
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+
   const [view, setView] = useState("dashboard");
   const [user, setUser] = useState<any>(null);
   const [vehicles, setVehicles] = useState<any[]>([]);
@@ -491,6 +500,10 @@ const App = () => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
 
   useEffect(() => {
+    // Check session storage per evitare login ad ogni refresh
+    const sessionAuth = sessionStorage.getItem("renco_auth");
+    if (sessionAuth === "true") setIsAuthenticated(true);
+
     loadExternalScripts();
     const initAuth = async () => {
       if (auth) {
@@ -514,7 +527,7 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    if (!user || !db) return;
+    if (!user || !db || !isAuthenticated) return;
     const qVehicles = query(
       collection(db, "artifacts", appId, "public", "data", "vehicles")
     );
@@ -560,7 +573,24 @@ const App = () => {
       unsubVehicles();
       unsubLogs();
     };
-  }, [user]);
+  }, [user, isAuthenticated]);
+
+  // --- LOGIN HANDLER ---
+  const handleLogin = (e: any) => {
+    e.preventDefault();
+    if (pinInput === APP_PIN) {
+      setIsAuthenticated(true);
+      sessionStorage.setItem("renco_auth", "true");
+    } else {
+      alert("PIN Errato!");
+      setPinInput("");
+    }
+  };
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    sessionStorage.removeItem("renco_auth");
+  };
 
   // --- PDF GENERATION ---
   const generatePDF = (logData: any) => {
@@ -964,6 +994,38 @@ const App = () => {
   };
 
   // --- VIEWS ---
+  const renderLogin = () => (
+    <div className="min-h-screen bg-orange-600 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm text-center">
+        <div className="w-16 h-16 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center mx-auto mb-4">
+          <Lock className="w-8 h-8" />
+        </div>
+        <h1 className="text-2xl font-bold text-gray-800 mb-2">
+          Area Riservata
+        </h1>
+        <p className="text-gray-500 mb-6 text-sm">
+          Inserisci il PIN aziendale per accedere alla flotta.
+        </p>
+
+        <form onSubmit={handleLogin} className="space-y-4">
+          <input
+            type="password"
+            pattern="[0-9]*"
+            inputMode="numeric"
+            className="w-full text-center text-2xl tracking-widest p-3 border rounded-lg focus:ring-2 focus:ring-orange-500 outline-none font-mono"
+            placeholder="PIN"
+            value={pinInput}
+            onChange={(e) => setPinInput(e.target.value)}
+            autoFocus
+          />
+          <Button type="submit" className="w-full justify-center">
+            <LogIn className="w-4 h-4" /> Accedi
+          </Button>
+        </form>
+      </div>
+    </div>
+  );
+
   const renderDashboard = () => {
     // Filtra i veicoli in base alla ricerca Dashboard
     const filteredVehicles = vehicles.filter(
@@ -1497,6 +1559,10 @@ const App = () => {
     );
   };
 
+  if (!isAuthenticated) {
+    return renderLogin();
+  }
+
   return (
     <div className="min-h-screen bg-slate-50 pb-20 font-sans text-slate-900">
       <Toast
@@ -1506,11 +1572,19 @@ const App = () => {
         onClose={() => setToast({ ...toast, visible: false })}
       />
       <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-30">
-        <div className="max-w-5xl mx-auto flex items-center gap-3">
-          <div className="bg-orange-600 w-10 h-10 rounded flex items-center justify-center font-bold">
-            R
+        <div className="max-w-5xl mx-auto flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <div className="bg-orange-600 w-10 h-10 rounded flex items-center justify-center font-bold">
+              R
+            </div>
+            <h1 className="text-xl font-bold">Renco.Fleet-Management</h1>
           </div>
-          <h1 className="text-xl font-bold">Renco.Fleet-Management</h1>
+          <button
+            onClick={handleLogout}
+            className="text-xs text-gray-400 hover:text-white"
+          >
+            Esci
+          </button>
         </div>
       </header>
       <div className="max-w-5xl mx-auto px-4 mt-6">
