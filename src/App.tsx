@@ -23,6 +23,9 @@ import {
   AlertCircle,
   Download,
   Maximize,
+  Calendar,
+  Clock,
+  BookOpen,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
 
@@ -40,6 +43,9 @@ import {
   query,
   runTransaction,
   setDoc,
+  orderBy,
+  where,
+  getDocs,
 } from "firebase/firestore";
 
 // Definizioni per TypeScript (Mantenute per coerenza)
@@ -201,6 +207,8 @@ const Button = ({
     outline: "border border-gray-300 text-gray-700 hover:bg-gray-50",
     // Nuovo stile per Excel: verde scuro
     excel: "bg-green-700 text-white hover:bg-green-800 shadow-green-100",
+    // Stile per Prenotazione
+    booking: "bg-purple-600 text-white hover:bg-purple-700 shadow-purple-100",
   };
 
   return (
@@ -216,6 +224,23 @@ const Button = ({
   );
 };
 
+// Nuova Badge per la prenotazione condizionale
+const BookingBadge = () => (
+  <span
+    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border bg-purple-100 text-purple-700 border-purple-200`}
+  >
+    Prenotato
+  </span>
+);
+// Nuova Badge per la prenotazione in uso
+const BookingInUseBadge = () => (
+  <span
+    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-700 border-orange-200`}
+  >
+    In Corso
+  </span>
+);
+
 const Badge = ({ status }: { status: string }) => {
   const styles: any = {
     disponibile: "bg-green-100 text-green-700 border-green-200",
@@ -223,7 +248,7 @@ const Badge = ({ status }: { status: string }) => {
     manutenzione: "bg-red-100 text-red-700 border-red-200",
   };
   return (
-    <span
+    <span // FIX: Chiuso il tag <span> correttamente. Era </Badge>
       className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
         styles[status.toLowerCase()] || "bg-gray-100"
       }`}
@@ -789,7 +814,7 @@ const FUEL_LEVELS = ["Riserva", "1/4", "1/2", "3/4", "Pieno"];
 
 // Messaggio Disclaimer Aggiornato (Punto 1)
 const DAMAGE_DISCLAIMER =
-  "In caso di danneggiamento, qualora il danno ammonti ad un valore superiore a 500€, la società si riserva il diritto di addebitare al dipendente il 20% dell'importo della riparazione.";
+  "In caso di danneggiamento, qualora il danno ammonti ad un valore superiore a 500€, la società si riserva il diritto di addebitare al dipendente il 20% dell'importo della riparazione";
 
 // Funzione di utilità per il check se il dispositivo è mobile
 const isMobileDevice = () => {
@@ -807,26 +832,35 @@ const App = () => {
   const [authRole, setAuthRole] = useState<"guest" | "admin">("guest");
   const [pinInput, setPinInput] = useState("");
   const [isAuthReady, setIsAuthReady] = useState(false);
+  // AGGIUNTO 'bookings' alla navigazione
   const [view, setView] = useState("dashboard");
   const [user, setUser] = useState<any>(null);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  // Nuovo stato per le prenotazioni
+  const [bookings, setBookings] = useState<any[]>([]);
   const [loadingData, setLoadingData] = useState(true);
   const [permissionError, setPermissionError] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchFleetTerm, setSearchFleetTerm] = useState("");
   const [searchDashboardTerm, setSearchDashboardTerm] = useState("");
+  // Aggiunto stato per la prenotazione da modificare
   const [selectedVehicle, setSelectedVehicle] = useState<any>(null);
   const [selectedLog, setSelectedLog] = useState<any>(null);
+  const [selectedBooking, setSelectedBooking] = useState<any>(null);
+  // Aggiunto 'book' e 'editBook' a modalMode
   const [modalMode, setModalMode] = useState<string | null>(null);
   const [formData, setFormData] = useState<any>({});
-  const [checklist, setChecklist] = useState<any>({});
+  // Corretto: Inizializza checklist come tutti true per il default spuntato.
+  const [checklist, setChecklist] = useState<any>(() => {
+    const initialChecklist: any = {};
+    CHECKLIST_ITEMS.forEach((item) => (initialChecklist[item.id] = true));
+    return initialChecklist;
+  });
   const [photos, setPhotos] = useState<any[]>([]);
   // signature viene aggiornata solo dal salvataggio della modale fullscreen o dal pad piccolo
   const [signature, setSignature] = useState<string | null>(null);
   const [xlsxLoaded, setXlsxLoaded] = useState(true);
-
-  // Rimosso lo stato isSignatureModalOpen
 
   const [toast, setToast] = useState<ToastState>({
     visible: false,
@@ -869,6 +903,72 @@ const App = () => {
     const year = date.getFullYear();
     // PUNTO 1: Formato data PDF gg-mm-aaaa con trattino
     return `${day}-${month}-${year}`;
+  };
+
+  // Funzione per formattare data e ora per i picker HTML
+  const formatDateTimeLocal = (isoString?: string) => {
+    const date = isoString ? new Date(isoString) : new Date();
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 16);
+  };
+
+  // Funzione per verificare il conflitto di prenotazione (Punto 2)
+  const checkBookingConflict = (
+    vehicleId: string,
+    newStart: string,
+    newEnd: string,
+    existingBookings: any[],
+    currentBookingId: string | null = null,
+    currentVehicleStatus: string = "disponibile",
+    currentReturnDateExpected: string | null = null
+  ) => {
+    const newStartMs = new Date(newStart).getTime();
+    const newEndMs = new Date(newEnd).getTime();
+    const nowMs = new Date().getTime();
+
+    // 0. Controlla se le date sono valide
+    if (newStartMs >= newEndMs) {
+      return "La data di rientro presunta deve essere successiva alla data di ritiro.";
+    }
+
+    // 1. Controlla conflitto con prenotazioni future esistenti
+    const conflictingBooking = existingBookings.find((booking) => {
+      if (booking.vehicleId !== vehicleId) return false;
+      if (currentBookingId && booking.id === currentBookingId) return false;
+
+      const existingStartMs = new Date(booking.date).getTime();
+      const existingEndMs = new Date(booking.returnDate).getTime();
+
+      // Check di sovrapposizione: (InizioA < FineB) && (FineA > InizioB)
+      const overlap = newStartMs < existingEndMs && newEndMs > existingStartMs;
+
+      return overlap;
+    });
+
+    if (conflictingBooking) {
+      return `Conflitto: il veicolo è già prenotato da ${
+        conflictingBooking.driver
+      } dal ${formatDate(conflictingBooking.date)} al ${formatDate(
+        conflictingBooking.returnDate
+      )}.`;
+    }
+
+    // 2. Controlla conflitto con l'occupazione attuale del veicolo (se è fuori)
+    if (currentVehicleStatus === "impegnato" && currentReturnDateExpected) {
+      const currentExpectedReturnMs = new Date(
+        currentReturnDateExpected
+      ).getTime();
+
+      // Se l'attuale rientro previsto è SUCCESSIVO all'inizio della NUOVA prenotazione, c'è conflitto.
+      // Cioè: il veicolo non sarà rientrato prima che la nuova prenotazione inizi.
+      if (currentExpectedReturnMs > newStartMs) {
+        return `Conflitto: il veicolo è in uso con rientro previsto il ${formatDate(
+          currentReturnDateExpected
+        )}. Questa data è successiva all'inizio della tua prenotazione.`;
+      }
+    }
+
+    return null; // Nessun conflitto
   };
 
   // --- FUNZIONI DI GENERAZIONE PDF ---
@@ -1163,40 +1263,102 @@ const App = () => {
   };
 
   // --- FUNZIONI DI GESTIONE MODALI ---
-  const openModal = (mode: string, vehicle: any = null) => {
-    // Solo Admin può aggiungere/modificare
-    if ((mode === "add" || mode === "edit") && authRole !== "admin") {
+  const openModal = (mode: string, data: any = null) => {
+    // Solo Admin può aggiungere/modificare/prenotare
+    if (
+      (mode === "add" ||
+        mode === "edit" ||
+        mode === "book" ||
+        mode === "editBook" ||
+        mode === "book_checkout") &&
+      authRole !== "admin"
+    ) {
       showToast(
-        "Accesso negato: solo gli amministratori possono modificare la flotta.",
+        "Accesso negato: solo gli amministratori possono gestire la flotta.",
         "error"
       );
       return;
     }
     setModalMode(mode);
-    setSelectedVehicle(vehicle);
-    setSelectedLog(null); // Resetta log selezionato
-    const initCheck: any = {};
-    CHECKLIST_ITEMS.forEach((i) => (initCheck[i.id] = true));
-    setChecklist(initCheck);
+    setSelectedLog(null);
+    // CORREZIONE: Inizializza checklist a true qui per il modulo di checkin/checkout
+    const initialChecklist: any = {};
+    CHECKLIST_ITEMS.forEach((item) => (initialChecklist[item.id] = true));
+    setChecklist(initialChecklist);
     setPhotos([]);
     setSignature(null);
 
-    // Pre-fill per Edit o Transaction
-    if (vehicle) {
+    // Variabili per l'inizializzazione
+    const now = formatDateTimeLocal();
+    const future = new Date(new Date().getTime() + 3600000 * 24); // 24 ore dopo
+    const futureTime = formatDateTimeLocal(future.toISOString());
+
+    // Gestione Checkout da Prenotazione (data è la prenotazione, serve trovare il veicolo)
+    if (mode === "book_checkout") {
+      const vehicle = vehicles.find((v) => v.id === data.vehicleId);
+      setSelectedVehicle(vehicle);
+      setSelectedBooking(data);
       setFormData({
-        model: vehicle.model,
-        plate: vehicle.plate,
-        km: vehicle.km,
-        fuel: vehicle.fuel || "Pieno",
-        driver: vehicle.driver || "",
-        commessa: vehicle.commessa || "",
-        imageUrl: vehicle.imageUrl || "", // Carica l'immagine Base64 esistente
-        currentSignature: null, // Firma corrente
+        model: vehicle?.model,
+        plate: vehicle?.plate,
+        km: vehicle?.km,
+        fuel: vehicle?.fuel || "Pieno",
+        // Pre-fill con i dati di prenotazione
+        driver: data.driver || "",
+        commessa: data.commessa || "",
+        imageUrl: vehicle?.imageUrl || "",
+        // Data rientro prevista presa dalla prenotazione
+        returnDate: formatDateTimeLocal(data.returnDate),
+      });
+      setModalMode("checkout"); // Forzo la modale di checkout (Consegna)
+      return;
+    }
+
+    // Gestione Modifica Prenotazione
+    if (mode === "editBook") {
+      setSelectedBooking(data); // data è la prenotazione
+      setSelectedVehicle(vehicles.find((v) => v.id === data.vehicleId));
+      setFormData({
+        reservationDriver: data.driver || "",
+        reservationCommessa: data.commessa || "",
+        reservationDateStart: formatDateTimeLocal(data.date),
+        reservationDateEnd: formatDateTimeLocal(data.returnDate),
+      });
+      return;
+    }
+
+    // Gestione Checkout/Checkin/Add/Book (data è il veicolo)
+    setSelectedBooking(null);
+    setSelectedVehicle(data);
+
+    if (data) {
+      setFormData({
+        model: data.model,
+        plate: data.plate,
+        km: data.km,
+        fuel: data.fuel || "Pieno",
+        driver: data.driver || "",
+        commessa: data.commessa || "",
+        imageUrl: data.imageUrl || "",
+        currentSignature: null,
+        reservationDriver: "",
+        reservationCommessa: "",
+        reservationDateStart: now,
+        reservationDateEnd: futureTime,
+        // Data di rientro prevista dal veicolo corrente (se in uso)
+        returnDate: data.returnDateExpected
+          ? formatDateTimeLocal(data.returnDateExpected)
+          : "",
       });
     } else {
       setFormData({
-        imageUrl: "", // Inizializza l'immagine Base64
+        imageUrl: "",
         currentSignature: null,
+        reservationDriver: "",
+        reservationCommessa: "",
+        reservationDateStart: now,
+        reservationDateEnd: futureTime,
+        returnDate: "",
       });
     }
   };
@@ -1205,7 +1367,7 @@ const App = () => {
     setModalMode("editLog");
     setSelectedLog(log);
     setSelectedVehicle(null);
-    // PULISCI FIRMA: setSignature a null per forzare una nuova firma (PUNTO 3)
+    // PULISCIE FIRMA: setSignature a null per forzare una nuova firma (PUNTO 3)
     setSignature(null);
     setChecklist(log.checklist || {});
     setPhotos(log.photos || []);
@@ -1225,6 +1387,7 @@ const App = () => {
     setModalMode(null);
     setSelectedVehicle(null);
     setSelectedLog(null);
+    setSelectedBooking(null);
     setFormData({});
   };
 
@@ -1243,6 +1406,132 @@ const App = () => {
   };
 
   // --- FUNZIONI DI GESTIONE (HANDLE...) ---
+
+  // FUNZIONE: Modifica Prenotazione (Punto 2)
+  const handleEditBooking = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db || !selectedBooking) return;
+
+    const { reservationDateStart, reservationDateEnd } = formData;
+    const vehicleToEdit = vehicles.find(
+      (v) => v.id === selectedBooking.vehicleId
+    );
+
+    // 1. Dati veicolo (per check conflitto con rientro attuale se in uso)
+    const vehicleData = vehicles.find(
+      (v) => v.id === selectedBooking.vehicleId
+    );
+    const returnDateExpected = vehicleData?.returnDateExpected || null;
+
+    // 2. Validazione Conflitti
+    const conflictMessage = checkBookingConflict(
+      selectedBooking.vehicleId,
+      reservationDateStart,
+      reservationDateEnd,
+      bookings,
+      selectedBooking.id, // Esclude la prenotazione corrente
+      vehicleData?.status, // Passa lo stato attuale
+      returnDateExpected // Passa il rientro previsto attuale
+    );
+
+    if (conflictMessage) {
+      showToast(conflictMessage, "error");
+      return;
+    }
+
+    try {
+      const bookingRef = getPublicDocRef("bookings", selectedBooking.id);
+
+      await updateDoc(bookingRef, {
+        driver: formData.reservationDriver,
+        commessa: formData.reservationCommessa || null,
+        date: reservationDateStart,
+        returnDate: reservationDateEnd,
+        lastModified: new Date().toISOString(),
+      });
+
+      closeModal();
+      showToast(
+        `Prenotazione per ${vehicleToEdit?.plate} aggiornata con successo.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      showToast("Errore aggiornamento prenotazione.", "error");
+    }
+  };
+
+  // FUNZIONE: Nuova Prenotazione
+  const handleBooking = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db || !selectedVehicle) return;
+
+    const { reservationDateStart, reservationDateEnd } = formData;
+
+    // 1. Dati veicolo (per check conflitto con rientro attuale se in uso)
+    const returnDateExpected = selectedVehicle.returnDateExpected || null;
+
+    // 2. Validazione Conflitti
+    const conflictMessage = checkBookingConflict(
+      selectedVehicle.id,
+      reservationDateStart,
+      reservationDateEnd,
+      bookings,
+      null, // Nuova prenotazione, nessun ID da escludere
+      selectedVehicle.status, // Passa lo stato attuale
+      returnDateExpected // Passa il rientro previsto attuale
+    );
+
+    if (conflictMessage) {
+      showToast(conflictMessage, "error");
+      return;
+    }
+
+    try {
+      const bookingData = {
+        vehicleId: selectedVehicle.id,
+        vehicleModel: selectedVehicle.model,
+        plate: selectedVehicle.plate,
+        driver: formData.reservationDriver,
+        commessa: formData.reservationCommessa || null,
+        date: reservationDateStart, // Data Ritiro Presunta
+        returnDate: reservationDateEnd, // Data Rientro Presunta
+        createdAt: new Date().toISOString(),
+      };
+
+      await addDoc(getPublicCollectionPath("bookings"), bookingData);
+      closeModal();
+      showToast(
+        `Prenotazione per ${selectedVehicle.plate} salvata per ${formData.reservationDriver}.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      showToast("Errore salvataggio prenotazione.", "error");
+    }
+  };
+
+  // FUNZIONE: Elimina Prenotazione
+  const deleteBooking = async (bookingId: string) => {
+    if (authRole !== "admin" || !db) return;
+
+    setConfirmModal({
+      isOpen: true,
+      title: "Conferma Cancellazione Prenotazione",
+      message:
+        "Sei sicuro di voler eliminare questa prenotazione? L'operazione è irreversibile.",
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          await deleteDoc(getPublicDocRef("bookings", bookingId));
+          showToast("Prenotazione eliminata.", "success");
+        } catch (err) {
+          showToast("Errore cancellazione prenotazione.", "error");
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
 
   // FUNZIONE: Login (Punto 1)
   const handleLogin = (e: any) => {
@@ -1278,6 +1567,7 @@ const App = () => {
           driver: null,
           currentTripId: null,
           commessa: null,
+          returnDateExpected: null, // Nuovo campo rientro previsto
         }
       );
       closeModal();
@@ -1431,6 +1721,7 @@ const App = () => {
 
     const type = modalMode === "checkout" ? "Consegna" : "Rientro"; // NOME AGGIORNATO
     const newStatus = modalMode === "checkout" ? "impegnato" : "disponibile";
+    const now = new Date().getTime();
 
     if (modalMode === "checkin" && parseInt(formData.km) < selectedVehicle.km) {
       showToast(
@@ -1438,6 +1729,53 @@ const App = () => {
         "error"
       );
       return;
+    }
+
+    // --- VALIDAZIONE PRENOTAZIONE SOLO PER CONSEGNA (CHECKOUT) ---
+    if (modalMode === "checkout") {
+      const plannedReturn = formData.returnDate
+        ? new Date(formData.returnDate).getTime()
+        : null;
+
+      // Trova la prenotazione attiva che potrei stare per iniziare
+      const activeBooking = bookings.find(
+        (b) =>
+          b.vehicleId === selectedVehicle.id &&
+          new Date(b.date).getTime() <= now && // La prenotazione dovrebbe essere iniziata o star per iniziare
+          new Date(b.returnDate).getTime() >= now
+      );
+
+      // Se la Consegna NON è partita da una prenotazione (book_checkout) ma una prenotazione è in corso O imminente
+      if (!selectedBooking && activeBooking) {
+        showToast(
+          `Errore: Impossibile effettuare la consegna. Il veicolo è prenotato per oggi (${formatDate(
+            activeBooking.date
+          )}) da ${
+            activeBooking.driver
+          }. Se sei tu il driver, usa la funzione 'Consegna' nella pagina Prenotazioni.`,
+          "error"
+        );
+        return;
+      }
+
+      // 2. Controllo se la riconsegna prevista va in conflitto con altre prenotazioni (solo se specificata)
+      if (plannedReturn) {
+        const conflictMessage = checkBookingConflict(
+          selectedVehicle.id,
+          new Date().toISOString(), // Inizio Adesso
+          formData.returnDate,
+          bookings
+        );
+        if (conflictMessage) {
+          showToast(
+            `Errore di Sovrapposizione: La riconsegna prevista per il ${formatDate(
+              formData.returnDate
+            )} entra in conflitto con una prenotazione esistente. Modifica la data o la prenotazione.`,
+            "error"
+          );
+          return;
+        }
+      }
     }
 
     try {
@@ -1472,6 +1810,9 @@ const App = () => {
         signature,
         // Inclusione dell'URL immagine veicolo per il PDF!
         imageUrl: selectedVehicle.imageUrl || null,
+        // Data di riconsegna prevista (solo al checkout)
+        returnDateExpected:
+          modalMode === "checkout" ? formData.returnDate || null : null,
       };
 
       // Aggiorna il veicolo
@@ -1484,20 +1825,47 @@ const App = () => {
         "vehicles",
         selectedVehicle.id
       );
-      await updateDoc(vehicleRef, {
+
+      const newVehicleData: any = {
         status: newStatus,
         driver: modalMode === "checkout" ? formData.driver : null,
         km: parseInt(formData.km) || selectedVehicle.km,
         fuel: formData.fuel,
         currentTripId: modalMode === "checkout" ? tripId : null,
         commessa: modalMode === "checkout" ? formData.commessa : null,
-      });
+        // Aggiorna il campo rientro previsto solo al checkout
+        returnDateExpected:
+          modalMode === "checkout" ? formData.returnDate || null : null,
+      };
+
+      await updateDoc(vehicleRef, newVehicleData);
 
       // Aggiunge il log
       await addDoc(
         collection(db, "artifacts", appId, "public", "data", "logs"),
         logData
       );
+
+      // LOGICA AGGIUNTIVA: CANCELLA PRENOTAZIONE AL RIENTRO (CHECKIN) SOLO SE INIZIATA DA PRENOTAZIONE
+      // PUNTO 4: La prenotazione deve restare valida se il rientro non è partito da essa.
+      if (modalMode === "checkin" && selectedVehicle.currentBookingId) {
+        const bookingIdToDelete = selectedVehicle.currentBookingId;
+
+        // NON cancelliamo la prenotazione, la disassociamo dal veicolo (la lasciamo nel DB per tracciamento)
+        // La cancellazione avviene solo manualmente in "Prenotazioni"
+
+        // Pulisci il riferimento al veicolo dopo il rientro (il mezzo non è più bloccato dalla prenotazione)
+        await updateDoc(vehicleRef, { currentBookingId: null });
+        console.log(
+          `Prenotazione ${bookingIdToDelete} disassociata al rientro.`
+        );
+      }
+
+      // LOGICA AGGIUNTIVA: ASSOCIA PRENOTAZIONE ALLA CONSEGNA
+      if (modalMode === "checkout" && selectedBooking) {
+        // Se la consegna è partita da una prenotazione, associa la prenotazione al veicolo
+        await updateDoc(vehicleRef, { currentBookingId: selectedBooking.id });
+      }
 
       closeModal();
 
@@ -1707,6 +2075,7 @@ const App = () => {
             <input
               id={item.id}
               type="checkbox"
+              // Usa lo stato locale `checklist` che è inizializzato a true per default
               checked={!!checklist[item.id]}
               onChange={(e) =>
                 setChecklist({
@@ -1735,6 +2104,8 @@ const App = () => {
     const isConsegna = modalMode === "checkout";
     const isEdit = modalMode === "edit";
     const isAdd = modalMode === "add";
+    const isBook = modalMode === "book";
+    const isEditBook = modalMode === "editBook";
 
     // Nomi movimenti nel titolo della modale
     const movementName = isConsegna ? "Consegna" : "Rientro";
@@ -1742,6 +2113,20 @@ const App = () => {
     // Determina la firma da mostrare nel piccolo box di anteprima
     const currentSignature =
       signature || (modalMode === "editLog" ? selectedLog?.signature : null);
+
+    const vehicleRef =
+      selectedVehicle ||
+      vehicles.find((v) => v.id === selectedBooking?.vehicleId);
+
+    const title = isAdd
+      ? "Nuovo Mezzo"
+      : isEdit
+      ? `Modifica Veicolo: ${vehicleRef?.model}`
+      : isBook
+      ? `Prenota Veicolo: ${vehicleRef?.model}`
+      : isEditBook
+      ? `Modifica Prenotazione: ${vehicleRef?.model}`
+      : `${movementName}: ${vehicleRef?.model}`;
 
     return (
       <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm">
@@ -1753,19 +2138,21 @@ const App = () => {
                 <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
                   {isAdd && <Plus className="w-5 h-5 text-orange-600" />}
                   {isEdit && <Pencil className="w-5 h-5 text-blue-600" />}
+                  {(isBook || isEditBook) && (
+                    <Calendar className="w-5 h-5 text-purple-600" />
+                  )}
                   {/* Il pulsante Consegna è stato spostato sul rosso, quindi l'icona qui è coerente */}
                   {isConsegna && (
                     <ArrowRight className="w-5 h-5 text-red-600" />
                   )}
-                  {!isConsegna && !isAdd && !isEdit && (
-                    <CheckCircle className="w-5 h-5 text-green-600" />
-                  )}
+                  {!isConsegna &&
+                    !isAdd &&
+                    !isEdit &&
+                    !(isBook || isEditBook) && (
+                      <CheckCircle className="w-5 h-5 text-green-600" />
+                    )}
 
-                  {isAdd
-                    ? "Nuovo Mezzo"
-                    : isEdit
-                    ? `Modifica Veicolo: ${selectedVehicle?.model}`
-                    : `${movementName}: ${selectedVehicle?.model}`}
+                  {title}
                 </h3>
                 <button
                   type="button"
@@ -1776,8 +2163,110 @@ const App = () => {
                 </button>
               </div>
 
-              {/* MODULO AGGIUNTA o MODIFICA VEICOLO */}
-              {isAdd || isEdit ? (
+              {/* MODULO PRENOTAZIONE (NUOVA O MODIFICA) */}
+              {isBook || isEditBook ? (
+                <form
+                  onSubmit={isBook ? handleBooking : handleEditBooking}
+                  className="space-y-4"
+                >
+                  <p className="text-sm text-gray-600 border-l-4 border-purple-400 pl-3 py-1 bg-purple-50 rounded-r-lg">
+                    {isBook
+                      ? `Registrazione di una prenotazione futura per ${vehicleRef?.model} (${vehicleRef?.plate}).`
+                      : `Modifica prenotazione per ${vehicleRef?.model} (${vehicleRef?.plate}) - Driver originale: ${selectedBooking?.driver}`}
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Nome e Cognome (Prenotazione)
+                      </label>
+                      <input
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Nome Driver Prenotato"
+                        value={formData.reservationDriver || ""}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDriver: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Commessa (Opzionale)
+                      </label>
+                      <input
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Es. 23-050"
+                        value={formData.reservationCommessa || ""}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationCommessa: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                  {/* Punti 3: Aggiunto input per data Rientro Presunta */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Data e Ora di Ritiro (Presunta)
+                      </label>
+                      <input
+                        type="datetime-local"
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        value={
+                          formData.reservationDateStart || formatDateTimeLocal()
+                        }
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDateStart: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Data e Ora di Rientro (Presunta)
+                      </label>
+                      <input
+                        type="datetime-local"
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        value={
+                          formData.reservationDateEnd || formatDateTimeLocal()
+                        }
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDateEnd: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 pt-4 sticky bottom-0 bg-white border-t pt-4">
+                    <Button
+                      variant="secondary"
+                      onClick={closeModal}
+                      className="w-auto"
+                    >
+                      Annulla
+                    </Button>
+                    <Button variant="booking" type="submit" className="w-auto">
+                      <Plus className="w-5 h-5" />{" "}
+                      {isBook ? "Prenota" : "Aggiorna Prenotazione"}
+                    </Button>
+                  </div>
+                </form>
+              ) : // MODULO AGGIUNTA o MODIFICA VEICOLO O MOVIMENTI
+              isAdd || isEdit ? (
                 <form
                   onSubmit={isAdd ? handleAddVehicle : handleEditVehicle}
                   className="space-y-4"
@@ -1926,18 +2415,45 @@ const App = () => {
 
                   {/* Commessa (solo Consegna) */}
                   {isConsegna && (
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Commessa (Opzionale)
-                      </label>
-                      <input
-                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
-                        placeholder="Es. 23-050"
-                        value={formData.commessa || ""}
-                        onChange={(e) =>
-                          setFormData({ ...formData, commessa: e.target.value })
-                        }
-                      />
+                    <div className="md:col-span-2 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Commessa (Opzionale)
+                        </label>
+                        <input
+                          className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
+                          placeholder="Es. 23-050"
+                          value={formData.commessa || ""}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              commessa: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      {/* NUOVO CAMPO: Data Riconsegna Prevista (Punto 6) */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-1">
+                          <Clock className="w-4 h-4 text-gray-500" /> Rientro
+                          Previsto (Opzionale)
+                        </label>
+                        <input
+                          type="datetime-local"
+                          className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
+                          value={formData.returnDate || ""}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              returnDate: e.target.value,
+                            })
+                          }
+                        />
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          Se specificato, verrà usato per controllare i
+                          conflitti con prenotazioni future.
+                        </p>
+                      </div>
                     </div>
                   )}
 
@@ -2166,6 +2682,177 @@ const App = () => {
     );
   };
 
+  const renderBookingsPage = () => {
+    const now = new Date().getTime();
+
+    // 1. Dati Prenotazioni Future (quelle create dagli utenti)
+    const futureBookings = bookings
+      .filter((b) => new Date(b.returnDate || b.date).getTime() > now) // Filtra solo quelle future
+      .map((b) => ({ ...b, type: "BOOKING" }));
+
+    // 2. Dati Mezzi Fuori (Non da Prenotazione con Data Rientro Prevista)
+    const nonBookedEngagedVehicles = vehicles
+      .filter(
+        (v) =>
+          v.status === "impegnato" &&
+          !v.currentBookingId &&
+          v.returnDateExpected
+      )
+      .map((v) => {
+        // Trova l'ultimo log di consegna per i dettagli
+        const lastConsegna = logs.find(
+          (l) => l.vehicleId === v.id && l.type === "Consegna"
+        );
+
+        return {
+          id: v.id,
+          type: "NON_BOOKED_OUT",
+          vehicleId: v.id,
+          vehicleModel: v.model,
+          plate: v.plate,
+          driver: v.driver,
+          commessa: v.commessa,
+          // Data Ritiro Reale (dal Log)
+          date: lastConsegna?.date || new Date().toISOString(),
+          // Data Rientro Prevista (dal Veicolo)
+          returnDate: v.returnDateExpected,
+        };
+      });
+
+    // 3. Unisci e Ordina (per data di ritiro/consegna)
+    const allActiveTrips = [
+      ...futureBookings,
+      ...nonBookedEngagedVehicles,
+    ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700 flex items-center gap-2">
+          <BookOpen className="w-6 h-6 text-purple-600" /> Calendario
+          Prenotazioni e Mezzi Fuori
+        </h2>
+
+        {allActiveTrips.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm border border-gray-100">
+            <Calendar className="w-10 h-10 mx-auto mb-3 text-gray-400" />
+            <p>Nessun mezzo fuori o prenotazione attiva registrata.</p>
+          </div>
+        ) : (
+          <Card>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Veicolo
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Driver / Commessa
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Ritiro/Consegna
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Rientro Previsto
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Azioni
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {allActiveTrips.map((b: any) => {
+                    const vehicle = vehicles.find((v) => v.id === b.vehicleId);
+                    const isBooking = b.type === "BOOKING";
+                    const isCheckedOutToThisBooking =
+                      isBooking && vehicle?.currentBookingId === b.id;
+                    const isNonBookedOut = b.type === "NON_BOOKED_OUT";
+
+                    return (
+                      <tr key={b.id + b.type} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          {b.vehicleModel} ({b.plate})
+                          {isNonBookedOut && (
+                            <span className="ml-2 text-[10px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
+                              NON DA PRENOTAZIONE
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {b.driver}
+                          <br />
+                          <span className="text-xs text-gray-500">
+                            Commessa: {b.commessa || "N/A"}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {formatDate(b.date)}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {formatDate(b.returnDate)}
+                          {isNonBookedOut && (
+                            <p className="text-xs text-red-500">
+                              (Rientro Previsto)
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <div className="flex justify-end gap-2">
+                            {isBooking && (
+                              <>
+                                {/* Pulsante Consegna (Checkout) da Prenotazione */}
+                                <button
+                                  onClick={() => openModal("book_checkout", b)}
+                                  className={`p-2 rounded-full transition-colors ${
+                                    isCheckedOutToThisBooking
+                                      ? "text-gray-400 cursor-not-allowed"
+                                      : "text-red-600 hover:text-red-900 hover:bg-red-50"
+                                  }`}
+                                  title={
+                                    isCheckedOutToThisBooking
+                                      ? "Consegna già avviata"
+                                      : "Inizia Consegna (Checkout)"
+                                  }
+                                  disabled={isCheckedOutToThisBooking}
+                                >
+                                  <ArrowRight className="w-4 h-4" />
+                                </button>
+                                {/* Pulsante Modifica Prenotazione */}
+                                <button
+                                  onClick={() => openModal("editBook", b)}
+                                  className="text-purple-600 hover:text-purple-900 p-2 rounded-full hover:bg-purple-50 transition-colors"
+                                  title="Modifica Prenotazione"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => deleteBooking(b.id)}
+                                  className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
+                                  title="Cancella Prenotazione"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                            {isNonBookedOut && (
+                              <span className="text-gray-500 text-xs py-2 px-3">
+                                Gestisci da Dashboard
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+      </div>
+    );
+  };
+
   const renderLogin = () => (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-4">
       <Card className="max-w-sm w-full p-6 text-center">
@@ -2179,13 +2866,11 @@ const App = () => {
         </p>
         <form onSubmit={handleLogin} className="space-y-4">
           <input
-            type="password"
+            type="password" // CORRETTO: type="password" per nascondere il PIN
             placeholder="PIN"
             value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            // L'input accetta il testo per RENCOMEZZI, ma lo nasconde come password
-            className="w-full border p-3 rounded-lg text-center tracking-[0.5em] font-mono text-lg focus:ring-2 focus:ring-orange-500 outline-none"
-            // PIN_UNICO è "RENCOMEZZI" (10 caratteri)
+            onChange={(e) => setPinInput(e.target.value.toUpperCase())} // Legge e converte in maiuscolo
+            className="w-full border p-3 rounded-lg text-center tracking-[0.5em] font-mono text-lg focus:ring-2 focus:ring-orange-500 outline-none uppercase"
             maxLength={PIN_UNICO.length}
             required
           />
@@ -2198,6 +2883,19 @@ const App = () => {
   );
 
   const renderDashboard = () => {
+    // Funzione helper per determinare se il veicolo ha una prenotazione futura
+    const isVehicleBooked = (vehicleId: string) => {
+      const now = new Date().getTime();
+      // Cerca una prenotazione FUTURA
+      return bookings.some((b) => {
+        if (b.vehicleId !== vehicleId) return false;
+        const start = new Date(b.date).getTime();
+        // La prenotazione è FUTURE
+        return start > now;
+      });
+    };
+
+    // Filtro e ricerca
     const filteredVehicles = vehicles.filter(
       (v) =>
         v.model.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
@@ -2209,14 +2907,20 @@ const App = () => {
     const engaged = vehicles.filter((v) => v.status === "impegnato");
     const totalVehicles = vehicles.length; // Calcolo Totale Veicoli
 
+    // Prenotazioni attive (solo quelle future)
+    const activeBookings = bookings.filter(
+      (b) => new Date(b.returnDate || b.date).getTime() > new Date().getTime()
+    );
+    const totalBookings = activeBookings.length;
+
     return (
       <div className="space-y-6">
         <h2 className="text-2xl font-extrabold text-gray-700">
           Dashboard Flotta
         </h2>
 
-        {/* Rimosso il contatore Manutenzione -> Griglia a 3 colonne */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        {/* Griglia Statistiche */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <Card className="p-4 flex items-center gap-4 bg-gray-100">
             <div className="bg-slate-700 p-3 rounded-full text-white">
               <Car className="w-6 h-6" />
@@ -2245,7 +2949,81 @@ const App = () => {
               <strong className="text-3xl font-bold">{engaged.length}</strong>
             </div>
           </Card>
+          {/* Box Prenotazioni */}
+          <Card className="p-4 flex items-center gap-4 bg-purple-50">
+            <div className="bg-purple-600 p-3 rounded-full text-white">
+              <Calendar className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Prenotati</p>{" "}
+              {/* Testo aggiornato */}
+              <strong className="text-3xl font-bold">{totalBookings}</strong>
+            </div>
+          </Card>
         </div>
+
+        {/* Visualizzazione Prossime Prenotazioni (Punto 3) */}
+        <Card
+          className={`p-4 space-y-3 ${
+            totalBookings > 0
+              ? "border-purple-300 bg-purple-50"
+              : "border-gray-300 bg-white"
+          }`}
+        >
+          <h3 className="text-lg font-bold text-purple-800 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <Calendar className="w-5 h-5" /> Prossime Prenotazioni
+            </span>
+            {/* Pulsante Prenota (RIMOSSO) */}
+          </h3>
+
+          {totalBookings === 0 ? (
+            <p className="text-sm text-gray-500">
+              Nessuna prenotazione attiva o futura.
+            </p>
+          ) : (
+            activeBookings
+              .sort(
+                (a, b) =>
+                  new Date(a.date).getTime() - new Date(b.date).getTime()
+              )
+              .slice(0, 3)
+              .map((b) => {
+                // Trova lo stato del veicolo e controlla se la prenotazione è "In Corso"
+                const vehicle = vehicles.find((v) => v.id === b.vehicleId);
+                const isCheckedOutToThisBooking =
+                  vehicle?.currentBookingId === b.id;
+
+                return (
+                  <div
+                    key={b.id}
+                    className="text-sm text-purple-700 flex justify-between items-center"
+                  >
+                    <p>
+                      {/* Aggiunto Marca e Modello (Punto 3) */}
+                      <strong className="font-semibold">
+                        {b.vehicleModel} ({b.plate})
+                      </strong>{" "}
+                      per {b.driver}
+                      <span className="text-xs text-purple-600 ml-2">
+                        ({formatDate(b.date)})
+                      </span>
+                    </p>
+                    {isCheckedOutToThisBooking ? (
+                      <BookingInUseBadge />
+                    ) : (
+                      <button
+                        onClick={() => setView("bookings")}
+                        className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                      >
+                        Gestisci
+                      </button>
+                    )}
+                  </div>
+                );
+              })
+          )}
+        </Card>
 
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
@@ -2272,90 +3050,133 @@ const App = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredVehicles.map((v) => (
-              <Card
-                key={v.id}
-                className="p-4 flex items-start gap-4 hover:shadow-md transition-shadow"
-              >
-                {/* Immagine veicolo o placeholder */}
-                <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0">
-                  {v.imageUrl ? (
-                    <img
-                      src={v.imageUrl}
-                      alt={v.model}
-                      className="w-full h-full object-cover border border-gray-200"
-                      onError={(e) => {
-                        // Fallback se l'immagine base64 è corrotta
-                        const target = e.target as HTMLImageElement;
-                        target.onerror = null;
-                        target.src = `https://placehold.co/64x64/f97316/ffffff?text=${v.plate}`;
-                        target.style.objectFit = "contain";
-                      }}
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold border border-gray-200">
-                      {v.plate || "NO IMG"}
-                    </div>
-                  )}
-                </div>
+            {filteredVehicles.map((v) => {
+              const isFutureBooked = isVehicleBooked(v.id);
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-start mb-1">
-                    <h3 className="text-lg font-bold truncate text-gray-900">
-                      {v.model}
-                    </h3>
-                    <Badge status={v.status} />
-                  </div>
-                  <p className="text-sm text-gray-600 font-mono mb-2">
-                    {v.plate}
-                  </p>
+              // Data rientro prevista per i mezzi in uso
+              const expectedReturn =
+                v.status === "impegnato" && v.returnDateExpected
+                  ? formatDate(v.returnDateExpected)
+                  : null;
 
-                  {/* Info Aggiuntive e Bottone */}
-                  <div className="mt-2 text-xs text-gray-500 space-y-1">
-                    <p>
-                      <strong>Km:</strong> {v.km} |<strong> Fuel:</strong>{" "}
-                      {v.fuel}
-                    </p>
-                    {v.status === "impegnato" && (
-                      <p className="text-orange-700">
-                        <User className="inline w-3 h-3 mr-1" />
-                        <strong>Driver:</strong> {v.driver || "N/A"} (Commessa:{" "}
-                        {v.commessa || "N/A"})
-                      </p>
-                    )}
-                  </div>
+              // Check se prenotabile: Non prenotabile se impegnato E non ha data di rientro prevista
+              const isBookable =
+                v.status !== "impegnato" ||
+                (v.status === "impegnato" && v.returnDateExpected);
 
-                  <div className="mt-4 flex gap-3">
-                    {/* Testo bottoni in Consegna/Rientro */}
-                    {v.status === "disponibile" ? (
-                      <Button
-                        variant="primary" // Ora in rosso
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        onClick={() => openModal("checkout", v)}
-                      >
-                        <ArrowRight className="w-4 h-4" /> Consegna
-                      </Button>
-                    ) : v.status === "impegnato" ? (
-                      <Button
-                        variant="success"
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        onClick={() => openModal("checkin", v)}
-                      >
-                        <CheckCircle className="w-4 h-4" /> Rientro
-                      </Button>
+              return (
+                <Card
+                  key={v.id}
+                  className="p-4 flex items-start gap-4 hover:shadow-md transition-shadow"
+                >
+                  {/* Immagine veicolo o placeholder */}
+                  <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0">
+                    {v.imageUrl ? (
+                      <img
+                        src={v.imageUrl}
+                        alt={v.model}
+                        className="w-full h-full object-cover border border-gray-200"
+                        onError={(e) => {
+                          // Fallback se l'immagine base64 è corrotta
+                          const target = e.target as HTMLImageElement;
+                          target.onerror = null;
+                          target.src = `https://placehold.co/64x64/f97316/ffffff?text=${v.plate}`;
+                          target.style.objectFit = "contain";
+                        }}
+                      />
                     ) : (
-                      <Button
-                        variant="danger"
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        disabled
-                      >
-                        Zap In Manutenzione
-                      </Button>
+                      <div className="w-full h-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold border border-gray-200">
+                        {v.plate || "NO IMG"}
+                      </div>
                     )}
                   </div>
-                </div>
-              </Card>
-            ))}
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start mb-1">
+                      <h3 className="text-lg font-bold truncate text-gray-900">
+                        {v.model}
+                      </h3>
+                      <div className="flex gap-1 items-center">
+                        {/* Label Prenotato (Punto 6) */}
+                        {isFutureBooked && <BookingBadge />}
+                        <Badge status={v.status} />
+                      </div>
+                    </div>
+                    <p className="text-sm text-gray-600 font-mono mb-2">
+                      {v.plate}
+                    </p>
+
+                    {/* Info Aggiuntive e Bottone */}
+                    <div className="mt-2 text-xs text-gray-500 space-y-1">
+                      <p>
+                        <strong>Km:</strong> {v.km} |<strong> Fuel:</strong>{" "}
+                        {v.fuel}
+                      </p>
+                      {v.status === "impegnato" && (
+                        <>
+                          <p className="text-orange-700">
+                            <User className="inline w-3 h-3 mr-1" />
+                            <strong>Driver:</strong> {v.driver || "N/A"}{" "}
+                            (Commessa: {v.commessa || "N/A"})
+                          </p>
+                          {/* Rientro Previsto (Punto 7) */}
+                          {expectedReturn && (
+                            <p className="text-red-700">
+                              <Clock className="inline w-3 h-3 mr-1" />
+                              <strong>Rientro Previsto:</strong>{" "}
+                              {expectedReturn}
+                            </p>
+                          )}
+                        </>
+                      )}
+
+                      {/* Pulsante Prenota sul veicolo */}
+                      {isBookable ? (
+                        <button
+                          onClick={() => openModal("book", v)}
+                          className="mt-2 text-xs font-medium text-purple-600 hover:text-purple-800 flex items-center gap-1 transition-colors"
+                        >
+                          <Calendar className="w-4 h-4" /> Prenota
+                        </button>
+                      ) : v.status === "impegnato" ? (
+                        <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
+                          Non Prenotabile (Rientro Non Previsto)
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4 flex gap-3">
+                      {/* Testo bottoni in Consegna/Rientro */}
+                      {v.status === "disponibile" ? (
+                        <Button
+                          variant="primary" // Ora in rosso
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          onClick={() => openModal("checkout", v)}
+                        >
+                          <ArrowRight className="w-4 h-4" /> Consegna
+                        </Button>
+                      ) : v.status === "impegnato" ? (
+                        <Button
+                          variant="success"
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          onClick={() => openModal("checkin", v)}
+                        >
+                          <CheckCircle className="w-4 h-4" /> Rientro
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="danger"
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          disabled
+                        >
+                          Zap In Manutenzione
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         )}
       </div>
@@ -2410,7 +3231,7 @@ const App = () => {
                     Km
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">
-                    Driver
+                    Driver Corrente
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Stato
@@ -2421,62 +3242,108 @@ const App = () => {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {filteredVehicles.map((v) => (
-                  <tr key={v.id}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      <div className="flex items-center gap-3">
-                        {v.imageUrl && (
-                          <img
-                            src={v.imageUrl}
-                            alt={v.model}
-                            className="w-8 h-8 object-cover rounded-full"
-                            onError={(e) => {
-                              const target = e.target as HTMLImageElement;
-                              target.onerror = null;
-                              target.src =
-                                "https://placehold.co/32x32/f97316/ffffff?text=C";
-                            }}
-                          />
-                        )}
-                        {!v.imageUrl && (
-                          <Car className="w-5 h-5 text-gray-400" />
-                        )}
-                        {v.model}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
-                      {v.plate}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden sm:table-cell">
-                      {v.km}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden md:table-cell">
-                      {v.driver || "N/A"}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <Badge status={v.status} />
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <div className="flex justify-end gap-2">
-                        <button
-                          onClick={() => openModal("edit", v)}
-                          className="text-blue-600 hover:text-blue-900 p-2 rounded-full hover:bg-blue-50 transition-colors"
-                          title="Modifica"
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => deleteVehicle(v.id)}
-                          className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
-                          title="Elimina"
-                          disabled={v.status !== "disponibile"} // Disabilita se in uso
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filteredVehicles.map((v) => {
+                  const nextBooking = bookings
+                    .filter(
+                      (b) =>
+                        b.vehicleId === v.id &&
+                        new Date(b.returnDate || b.date).getTime() >
+                          new Date().getTime()
+                    )
+                    .sort(
+                      (a, b) =>
+                        new Date(a.date).getTime() - new Date(b.date).getTime()
+                    )[0];
+
+                  // Non prenotabile se impegnato E non ha data di rientro prevista
+                  const isBookable =
+                    v.status !== "impegnato" ||
+                    (v.status === "impegnato" && v.returnDateExpected);
+
+                  return (
+                    <tr
+                      key={v.id}
+                      className="group hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        <div className="flex items-center gap-3">
+                          {v.imageUrl && (
+                            <img
+                              src={v.imageUrl}
+                              alt={v.model}
+                              className="w-8 h-8 object-cover rounded-full"
+                              onError={(e) => {
+                                const target = e.target as HTMLImageElement;
+                                target.onerror = null;
+                                target.src =
+                                  "https://placehold.co/32x32/f97316/ffffff?text=C";
+                              }}
+                            />
+                          )}
+                          {!v.imageUrl && (
+                            <Car className="w-5 h-5 text-gray-400" />
+                          )}
+                          <div>
+                            {v.model}
+                            {nextBooking && (
+                              <p className="text-[10px] text-purple-600 flex items-center gap-1 mt-0.5">
+                                <Calendar className="w-3 h-3" /> Prenotato da{" "}
+                                {nextBooking.driver} (
+                                {formatShortDate(nextBooking.date)})
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                        {v.plate}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden sm:table-cell">
+                        {v.km}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden md:table-cell">
+                        {v.driver || "N/A"}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <Badge status={v.status} />
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <div className="flex justify-end gap-2">
+                          {/* PULSANTE PRENOTA MEZZO IMPEGNATO (Punto 2) */}
+                          {isBookable && (
+                            <button
+                              onClick={() => openModal("book", v)}
+                              className="text-purple-600 hover:text-purple-900 p-2 rounded-full hover:bg-purple-50 transition-colors"
+                              title="Prenota questo veicolo"
+                            >
+                              <Calendar className="w-4 h-4" />
+                            </button>
+                          )}
+                          {!isBookable && v.status === "impegnato" && (
+                            <span className="text-xs text-red-500 py-2">
+                              Non Prenotabile
+                            </span>
+                          )}
+                          <button
+                            onClick={() => openModal("edit", v)}
+                            className="text-blue-600 hover:text-blue-900 p-2 rounded-full hover:bg-blue-50 transition-colors"
+                            title="Modifica"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => deleteVehicle(v.id)}
+                            className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
+                            title="Elimina"
+                            disabled={v.status !== "disponibile"} // Disabilita se in uso
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2848,9 +3715,27 @@ const App = () => {
       (err) => console.error("Error logs:", err)
     );
 
+    // Nuovo Listener per le Prenotazioni (Ordina per data più vicina)
+    const qBookings = query(
+      getPublicCollectionPath("bookings"),
+      orderBy("date", "asc")
+    );
+    const unsubBookings = onSnapshot(
+      qBookings,
+      (snapshot) => {
+        const bList = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setBookings(bList);
+      },
+      (err) => console.error("Error bookings:", err)
+    );
+
     return () => {
       unsubVehicles();
       unsubLogs();
+      unsubBookings(); // Cleanup nuovo listener
     };
   }, [isAuthReady, user, authRole]);
 
@@ -2871,7 +3756,8 @@ const App = () => {
   }
 
   // 3. Mostra l'app completa (admin role)
-  const availableViews = ["dashboard", "flotta", "storico"];
+  // AGGIUNTO 'bookings' alla lista delle viste
+  const availableViews = ["dashboard", "flotta", "storico", "bookings"];
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20 font-sans text-slate-900">
@@ -2913,7 +3799,7 @@ const App = () => {
                   : "text-slate-500 hover:bg-slate-50"
               }`}
             >
-              {t}
+              {t === "bookings" ? "Prenotazioni" : t}
             </button>
           ))}
         </nav>
@@ -2921,6 +3807,7 @@ const App = () => {
           {view === "dashboard" && renderDashboard()}
           {view === "flotta" && renderFleet()}
           {view === "storico" && renderHistory()}
+          {view === "bookings" && renderBookingsPage()}
         </main>
       </div>
       {renderModal()}
