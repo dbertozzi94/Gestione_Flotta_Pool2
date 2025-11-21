@@ -1072,7 +1072,7 @@ const App = () => {
           yPos
         );
         doc.text(
-          "nel caso in cui il danno ammonti ad un valore superiore ai 500\u20ac, nella misura del 20% dell'importo totale.",
+          "qualora il danno ammonti ad un valore superiore ai 500\u20ac, nella misura del 20% dell'importo totale.",
           14,
           yPos + 4
         );
@@ -1967,7 +1967,7 @@ const App = () => {
                       initialSignature={signature || selectedVehicle?.signature}
                       disclaimer={
                         isConsegna
-                          ? "In caso di danneggiamento la società si riserva il diritto di addebitare il costo di riparazione al dipendente, nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
+                          ? "In caso di danneggiamento, la società si riserva il diritto di addebitare il costo di riparazione al dipendente qualora il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
                           : null
                       }
                     />
