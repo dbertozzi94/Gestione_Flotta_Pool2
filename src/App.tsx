@@ -22,6 +22,7 @@ import {
   Users,
   AlertCircle,
   Download,
+  Maximize,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
 
@@ -46,25 +47,25 @@ declare global {
   interface Window {
     emailjs: any;
     jspdf: any;
-    // Aggiunto per il check mobile
     opera?: any;
+    XLSX: any;
   }
 }
 
 // --- VARIABILI GLOBALI (CANVAS) ---
-// Queste variabili sono fornite dall'ambiente Canvas.
 const __app_id = "flotta-renco-v1"; // Usato come fallback
+// Configurazione Firebase di esempio (verrà sovrascritta da Canvas)
 const __firebase_config = `{
   "apiKey": "AIzaSyCZTaNfYTeqKaWKOnf-dqQsBFwL4pZHQfM",
   "authDomain": "gestione-flotta-pool.firebaseapp.com",
   "projectId": "gestione-flotta-pool",
-  "storageBucket": "gestione-flotta-pool.firebasestorage.app",
+  "storageBucket": "gestione-flotta-pool.firebaseapp.com",
   "messagingSenderId": "86851688702",
   "appId": "1:86851688702:web:1cff896b5909a26ada2daf"
 }`;
 
 // --- SICUREZZA ---
-const PIN_UNICO = "RencoAdmin2025!"; // PIN Unico per l'accesso (Admin)
+const PIN_UNICO = "0000"; // PIN Unico per l'accesso (MODIFICATO: 0000)
 
 // INTERFACCIA TOAST
 interface ToastState {
@@ -80,7 +81,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== "undefined" ? __app_id : "default-app-id";
 
-// Funzione per ottenere il percorso della collezione pubblica
+// Funzione helper per le collezioni (Mantenuta per l'utilizzo in onSnapshot)
 const getPublicCollectionPath = (collectionName: string) =>
   collection(db, "artifacts", appId, "public", "data", collectionName);
 
@@ -96,7 +97,8 @@ const EMAILJS_CONFIG = {
 };
 
 // --- CARICAMENTO SCRIPT ESTERNI ---
-const loadExternalScripts = () => {
+const loadExternalScripts = (setXlsxLoaded: (loaded: boolean) => void) => {
+  // Caricamento EmailJS (se necessario)
   if (!window.emailjs && EMAILJS_CONFIG.PUBLIC_KEY) {
     const script = document.createElement("script");
     script.src =
@@ -105,12 +107,16 @@ const loadExternalScripts = () => {
     document.head.appendChild(script);
   }
 
+  // Caricamento jsPDF
   if (!window.jspdf) {
     const script = document.createElement("script");
     script.src =
       "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
     document.head.appendChild(script);
   }
+
+  // L'hack con estensione .xls è sempre disponibile
+  setXlsxLoaded(true);
 };
 
 // --- FUNZIONE CONTATORE PROGRESSIVO (TRIP ID) ---
@@ -137,6 +143,29 @@ const getNextTripId = async (dbInstance: any) => {
 
 // --- COMPONENTI UTILITY ---
 
+// Logo Renco Base (Arancio su Sfondo Chiaro - per login)
+const RencoLogo = ({ className = "text-orange-600" }) => (
+  <div
+    className={`flex items-center font-extrabold text-2xl tracking-tight ${className}`}
+  >
+    {/* Usiamo un div per simulare l'effetto obliquo (skew) sul testo */}
+    <div className="font-['Arial Black', sans-serif] text-3xl text-orange-600 transform skew-x-[-15deg]">
+      RENCO
+    </div>
+  </div>
+);
+
+// LOGO STILIZZATO RENCO PER HEADER INVERSO (Bianco su Sfondo Arancio)
+const RencoLogoHeader = ({ className = "" }) => (
+  <div
+    className={`flex items-center font-extrabold text-xl tracking-tight ${className}`}
+  >
+    <div className="font-['Arial Black', sans-serif] text-xl text-white transform skew-x-[-15deg] leading-none">
+      RENCO
+    </div>
+  </div>
+);
+
 const Card = ({
   children,
   className = "",
@@ -161,12 +190,17 @@ const Button = ({
   type = "button",
 }: any) => {
   const variants: any = {
-    primary: "bg-orange-600 text-white hover:bg-orange-700 shadow-orange-100",
+    // Pulsante Consegna (reso rosso per enfasi)
+    primary: "bg-red-600 text-white hover:bg-red-700 shadow-red-100",
     secondary:
       "bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200",
+    // Pulsante standard Admin (arancio Renco per coerenza)
+    admin: "bg-orange-600 text-white hover:bg-orange-700 shadow-orange-100",
     danger: "bg-red-50 text-red-600 hover:bg-red-100",
     success: "bg-green-600 text-white hover:bg-green-700",
     outline: "border border-gray-300 text-gray-700 hover:bg-gray-50",
+    // Nuovo stile per Excel: verde scuro
+    excel: "bg-green-700 text-white hover:bg-green-800 shadow-green-100",
   };
 
   return (
@@ -353,10 +387,21 @@ const VehiclePhotoUpload = ({ imageUrl, setImageUrl, onShowToast }: any) => {
   );
 };
 
-const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
+const SignaturePad = ({
+  onSave,
+  label,
+  disclaimer,
+  initialSignature,
+  setFormData,
+}: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasSignature, setHasSignature] = useState(false);
+  const [initialRenderDone, setInitialRenderDone] = useState(false);
+  // Stato interno per la firma in Base64
+  const [currentSignatureBase64, setCurrentSignatureBase64] = useState<
+    string | null
+  >(null);
 
   // Funzione di inizializzazione per disegnare la firma iniziale (se esiste)
   const drawInitialSignature = useCallback(() => {
@@ -371,24 +416,62 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
     ctx.lineWidth = 2;
     ctx.lineCap = "round";
 
-    if (initialSignature) {
-      const img = new Image();
-      img.onload = () => {
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        setHasSignature(true);
-      };
-      img.src = initialSignature;
-    }
-  }, [initialSignature]);
+    // Se c'è una firma base64 interna, usila. Altrimenti usa l'initialSignature (passata dall'esterno)
+    const sourceSig = currentSignatureBase64 || initialSignature;
 
+    // Ridisegna la firma
+    if (sourceSig) {
+      const img = new Image();
+      // Impedisce la ricorsione e il loop di re-rendering/disegno.
+      // Il disegno deve avvenire solo dopo che l'immagine è caricata.
+      img.onload = () => {
+        // Ricalcola le proporzioni se necessario
+        let drawWidth = canvas.width;
+        let drawHeight = canvas.height;
+        ctx.drawImage(img, 0, 0, drawWidth, drawHeight);
+      };
+      img.src = sourceSig;
+      setHasSignature(true);
+    } else {
+      setHasSignature(false);
+    }
+  }, [initialSignature, currentSignatureBase64]);
+
+  // Gestione della Responsività (cruciale per rotazione mobile)
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (canvas) {
+    if (!canvas) return;
+
+    const setupCanvas = () => {
+      // Imposta la larghezza in base al contenitore e l'altezza fissa.
       canvas.width = canvas.offsetWidth;
       canvas.height = 150;
-      drawInitialSignature(); // Disegna al mount
-    }
-  }, [drawInitialSignature]);
+
+      // Ridisegna l'ultima firma nota
+      drawInitialSignature();
+
+      if (!initialRenderDone) {
+        setInitialRenderDone(true);
+      }
+    };
+
+    // Timeout per assicurare che il DOM abbia calcolato l'offsetWidth corretto
+    const resizeTimer = setTimeout(setupCanvas, 150);
+
+    // Aggiungi listener per il resize (per la rotazione del dispositivo)
+    window.addEventListener("resize", setupCanvas);
+
+    return () => {
+      clearTimeout(resizeTimer);
+      window.removeEventListener("resize", setupCanvas);
+    };
+  }, [drawInitialSignature, initialRenderDone]);
+
+  // Sincronizza lo stato interno con l'input esterno (solo all'inizio)
+  useEffect(() => {
+    setCurrentSignatureBase64(initialSignature);
+    setHasSignature(!!initialSignature);
+  }, [initialSignature]);
 
   const startDrawing = (e: any) => {
     const canvas = canvasRef.current;
@@ -399,10 +482,27 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
     const x = (e.clientX || e.touches[0].clientX) - rect.left;
     const y = (e.clientY || e.touches[0].clientY) - rect.top;
 
+    // *** CORREZIONE CRITICA PER PERSISTENZA TRATTO ***
+    if (!isDrawing) {
+      // Se c'è una firma originale (initialSignature) MA NON abbiamo ancora una currentSignatureBase64
+      // (cioè è il primo tocco sul pad vuoto o con solo la vecchia firma), allora pulisci.
+      if (initialSignature && !currentSignatureBase64) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        setCurrentSignatureBase64(null);
+        onSave(null); // Notifica l'esterno che la vecchia firma è stata eliminata.
+      }
+      // Se currentSignatureBase64 esiste, NON fare nulla, semplicemente continua il tratto.
+    }
+
+    ctx.strokeStyle = "#000";
+    ctx.lineWidth = 2;
+    ctx.lineCap = "round";
+
     ctx.beginPath();
     ctx.moveTo(x, y);
+
     setIsDrawing(true);
-    setHasSignature(true); // Indica che l'utente ha iniziato a disegnare
+    setHasSignature(true);
   };
 
   const draw = (e: any) => {
@@ -421,13 +521,19 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
   };
 
   const stopDrawing = () => {
+    // Al rilascio del tocco/mouse, aggiorna lo stato interno del Base64 e lo stato esterno
     if (isDrawing) {
       setIsDrawing(false);
       const canvas = canvasRef.current;
-      if (canvas) onSave(canvas.toDataURL());
+      if (canvas) {
+        const base64 = canvas.toDataURL();
+        setCurrentSignatureBase64(base64);
+        onSave(base64); // CHIAMIAMO ONSAVE PER AGGIORNARE LO STATO ESTERNO (FIRMA CORRENTE)
+      }
     }
   };
 
+  // Funzione per la pulizia del canvas, chiamata da 'Pulisci'
   const clear = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -435,9 +541,23 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     setHasSignature(false);
-    onSave(null);
+    setCurrentSignatureBase64(null);
+    onSave(null); // Pulisce lo stato esterno
+
+    if (setFormData) {
+      // Pulisce anche la traccia di firma originale se si è in modalità Modifica Log
+      setFormData((prev: any) => ({
+        ...prev,
+        originalSignature: null,
+        currentSignature: null,
+      }));
+    }
   };
 
+  // Determina quale firma mostrare nell'anteprima/stato (uso la Base64 interna)
+  const displaySignature = currentSignatureBase64 || initialSignature;
+
+  // Modalità normale (nel form)
   return (
     <div className="border rounded-lg p-4 bg-gray-50">
       {disclaimer && (
@@ -453,7 +573,7 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
           type="button"
           onClick={clear}
           className="text-xs text-red-600 hover:underline disabled:opacity-50"
-          disabled={!hasSignature}
+          disabled={!displaySignature}
         >
           Pulisci
         </button>
@@ -469,7 +589,7 @@ const SignaturePad = ({ onSave, label, disclaimer, initialSignature }: any) => {
         onTouchMove={draw}
         onTouchEnd={stopDrawing}
       />
-      {!hasSignature && (
+      {!displaySignature && (
         <p className="text-xs text-gray-400 mt-1 text-center">
           Firma nell'area bianca
         </p>
@@ -571,7 +691,7 @@ const PhotoUpload = ({ photos, setPhotos, onShowToast }: any) => {
           </div>
         ))}
         <label
-          className={`w-20 h-20 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 text-gray-500 hover:text-orange-600 hover:border-orange-300 transition-colors ${
+          className={`w-20 h-20 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 text-gray-500 hover:text-orange-600 hover:border-orange-300 transition-colors shrink-0 ${
             compressing ? "opacity-50 cursor-wait" : ""
           }`}
         >
@@ -628,17 +748,19 @@ const Toast = ({
           type === "error" ? "bg-red-500" : "bg-green-500"
         }`}
       >
-        {type === "error" ? (
-          <AlertTriangle className="w-4 h-4 text-white" />
-        ) : (
-          <CheckCircle className="w-4 h-4 text-white" />
-        )}
+        <div className="flex items-center gap-2">
+          {type === "error" ? (
+            <AlertTriangle className="w-4 h-4 text-white" />
+          ) : (
+            <CheckCircle className="w-4 h-4 text-white" />
+          )}
+        </div>
       </div>
       <div>
         <h4 className="font-bold text-sm mb-1">
           {type === "error" ? "Errore" : "Operazione Completata"}
         </h4>
-        <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-line">
+        <p className="text-xs text-gray-300 leading-relaxed whitespace-pre-line mb-2">
           {message}
         </p>
       </div>
@@ -667,14 +789,17 @@ const FUEL_LEVELS = ["Riserva", "1/4", "1/2", "3/4", "Pieno"];
 
 // Funzione di utilità per il check se il dispositivo è mobile
 const isMobileDevice = () => {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  if (typeof window === "undefined" || typeof navigator === "undefined")
+    return false;
   const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-  return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent.toLowerCase());
+  return /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(
+    userAgent.toLowerCase()
+  );
 };
 
 // --- APP PRINCIPALE ---
 const App = () => {
-  // --- STATO AUTENTICAZIONE e RUOLI ---
+  // --- STATO ---
   const [authRole, setAuthRole] = useState<"guest" | "admin">("guest");
   const [pinInput, setPinInput] = useState("");
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -688,11 +813,16 @@ const App = () => {
   const [searchFleetTerm, setSearchFleetTerm] = useState("");
   const [searchDashboardTerm, setSearchDashboardTerm] = useState("");
   const [selectedVehicle, setSelectedVehicle] = useState<any>(null);
+  const [selectedLog, setSelectedLog] = useState<any>(null);
   const [modalMode, setModalMode] = useState<string | null>(null);
   const [formData, setFormData] = useState<any>({});
   const [checklist, setChecklist] = useState<any>({});
   const [photos, setPhotos] = useState<any[]>([]);
+  // signature viene aggiornata solo dal salvataggio della modale fullscreen o dal pad piccolo
   const [signature, setSignature] = useState<string | null>(null);
+  const [xlsxLoaded, setXlsxLoaded] = useState(true);
+
+  // Rimosso lo stato isSignatureModalOpen
 
   const [toast, setToast] = useState<ToastState>({
     visible: false,
@@ -700,7 +830,6 @@ const App = () => {
     type: "success",
   });
 
-  // Stato per il Modale di Conferma (sostituisce alert/confirm)
   const [confirmModal, setConfirmModal] = useState<any>({
     isOpen: false,
     title: "",
@@ -715,179 +844,61 @@ const App = () => {
     setToast({ visible: true, message, type });
   };
 
-  // --- INIZIALIZZAZIONE & AUTH ---
-  useEffect(() => {
-    loadExternalScripts();
-    const initAuth = async () => {
-      try {
-        if (auth && !auth.currentUser) {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Auth Error (Anonimo):", error);
-        showToast("Errore Autenticazione Anonima.", "error");
-      }
-      setIsAuthReady(true);
-    };
-    initAuth();
-
-    const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      const sessionAuth = sessionStorage.getItem("renco_auth_role");
-      if (sessionAuth) {
-        setAuthRole(sessionAuth as "guest" | "admin");
-      }
-    });
-
-    return () => unsubscribeAuth();
-  }, []);
-
-  // --- CARICAMENTO DATI FIREBASE ---
-  useEffect(() => {
-    if (!user || authRole === "guest") {
-      setLoadingData(false);
-      return;
-    }
-
-    setLoadingData(true);
-
-    const qVehicles = query(getPublicCollectionPath("vehicles"));
-    const unsubVehicles = onSnapshot(
-      qVehicles,
-      (snapshot) => {
-        const vList = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-        setVehicles(
-          vList.sort((a: any, b: any) => a.model.localeCompare(b.model))
-        );
-        setLoadingData(false);
-        setPermissionError(false);
-      },
-      (err: any) => {
-        console.error("Error vehicles:", err);
-        if (err.code === "permission-denied") setPermissionError(true);
-        setLoadingData(false);
-      }
-    );
-
-    const qLogs = query(getPublicCollectionPath("logs"));
-    const unsubLogs = onSnapshot(
-      qLogs,
-      (snapshot) => {
-        const lList = snapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
-        setLogs(
-          lList.sort(
-            (a: any, b: any) =>
-              new Date(b.date).getTime() - new Date(a.date).getTime()
-          )
-        );
-      },
-      (err) => console.error("Error logs:", err)
-    );
-
-    return () => {
-      unsubVehicles();
-      unsubLogs();
-    };
-  }, [user, authRole]);
-
   // Funzione di utilità per formattare la data
   const formatDate = (isoString: string) => {
+    // Usiamo toLocaleString per includere ora e data nel formato locale (per l'export)
     return new Date(isoString).toLocaleDateString("it-IT", {
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
       hour: "2-digit",
       minute: "2-digit",
+      hour12: false, // Forze formato 24h
     });
   };
 
-  // --- EXPORT TO EXCEL HACK (PUNTO 4) ---
-  const exportToExcelHack = (data: any[], filename: string) => {
-    if (data.length === 0) {
-      showToast("Nessun dato da esportare.", "error");
-      return;
-    }
-    
-    // Header CSV con colonne importanti
-    const headers = [
-        "Trip ID", "Tipo Movimento", "Data", "Modello Veicolo", 
-        "Targa", "Driver", "Commessa", "Km", "Carburante", "Danni", 
-        "Note", ...CHECKLIST_ITEMS.map(item => `Dotazione ${item.label}`)
-    ];
-
-    // Mappa i dati log in righe CSV
-    const csvRows = data.map(log => {
-        const checklistValues = CHECKLIST_ITEMS.map(item => log.checklist?.[item.id] ? "SI" : "NO");
-        
-        return [
-            `#${log.tripId || 'N/A'}`,
-            log.type,
-            formatDate(log.date),
-            log.vehicleModel,
-            log.plate,
-            log.driver || "N/A",
-            log.commessa || "N/A",
-            log.km,
-            log.fuel,
-            log.damages ? log.damages.replace(/"/g, '""') : "", // Escape double quotes
-            log.notes ? log.notes.replace(/"/g, '""') : "",
-            ...checklistValues
-        ].map(field => `"${field}"`).join(';'); // Uso ; come separatore per la compatibilità EU Excel
-    });
-
-    const csvContent = [
-        headers.join(';'), // Uso ; nel header
-        ...csvRows
-    ].join('\n');
-
-    // MIME Type e estensione per forzare l'apertura in Excel (Hack)
-    const blob = new Blob(["\ufeff", csvContent], { type: 'application/vnd.ms-excel;charset=utf-8;' });
-    const link = document.createElement("a");
-    if (link.download !== undefined) {
-        const url = URL.createObjectURL(blob);
-        link.setAttribute("href", url);
-        link.setAttribute("download", filename.replace(".csv", ".xls")); // Cambio estensione in .xls
-        link.style.visibility = 'hidden';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        showToast("Storico esportato in formato compatibile Excel.", "success");
-    }
+  // Funzione per formattare la data solo giorno/mese/anno
+  const formatShortDate = (isoString: string) => {
+    const date = new Date(isoString);
+    const day = String(date.getDate()).padStart(2, "0");
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const year = date.getFullYear();
+    // PUNTO 1: Formato data PDF gg-mm-aaaa con trattino
+    return `${day}-${month}-${year}`;
   };
 
+  // --- FUNZIONI DI GENERAZIONE PDF ---
 
-  // --- PDF GENERATION (CORRETTA PER MOBILE/PC) ---
-  const generatePDF = (logData: any) => {
+  // Funzione helper che crea il PDF come oggetto jspdf e lo restituisce (Generazione al volo)
+  const generatePDFDocument = (logData: any) => {
     if (!window.jspdf) {
-      showToast(
-        "Libreria PDF non ancora caricata. Riprova tra qualche secondo.",
-        "error"
-      );
-      return;
+      console.error("Libreria PDF non caricata.");
+      return null;
     }
-    setGeneratingPdf(true);
     try {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF();
       const pageWidth = doc.internal.pageSize.width;
       let yPos = 14;
 
-      // Header
-      doc.setFillColor(234, 88, 12);
+      // --- LOGICA DI LAYOUT PDF ---
+
+      // Header - Colore Renco (Orange 600)
+      const RENCO_ORANGE_RGB = [234, 88, 12]; // Colore arancio
+
+      // 1. STILE HEADER PDF: Uguale all'header dell'app (Orange 600)
+      doc.setFillColor(...RENCO_ORANGE_RGB);
       doc.rect(0, 0, pageWidth, 24, "F");
+
+      // LOGO RENCO STILIZZATO BIANCO SU ARANCIO
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(20);
+      // Usiamo 'helvetica' e 'bold' come font più vicino a 'Arial Black' per coerenza
       doc.setFont("helvetica", "bold");
+      // Posizioniamo la scritta RENCO (simulando il logo)
       doc.text("RENCO", 14, 16);
-      doc.setFontSize(12);
-      doc.setFont("helvetica", "normal");
-      doc.text("Gestione Flotta Pool", 14 + 30, 16);
+
+      // RIMOSSA LA SCRITTA "Gestione Flotta Pool" dal verbale
 
       yPos = 40;
       doc.setTextColor(0, 0, 0);
@@ -896,7 +907,7 @@ const App = () => {
       doc.text(`VERBALE DI ${logData.type.toUpperCase()}`, 14, yPos);
 
       doc.setFontSize(12);
-      doc.setTextColor(234, 88, 12);
+      doc.setTextColor(234, 88, 12); // Tonalità arancio Renco
       doc.text(`Trip ID: #${logData.tripId || "N/A"}`, pageWidth - 60, yPos);
 
       yPos += 6;
@@ -925,11 +936,7 @@ const App = () => {
       doc.setFont("helvetica", "normal");
       doc.text(`${logData.driver || "N/A"}`, 100, yPos + 17);
       // Commessa
-      doc.text(
-        `Commessa: ${logData.commessa || "N/A"}`,
-        100,
-        yPos + 23
-      );
+      doc.text(`Commessa: ${logData.commessa || "N/A"}`, 100, yPos + 23);
 
       // Colonna 3: Stato
       doc.setFont("helvetica", "bold");
@@ -951,14 +958,12 @@ const App = () => {
         const items = CHECKLIST_ITEMS;
         items.forEach((item, index) => {
           const isPresent = logData.checklist[item.id];
-          
-          // NUOVO: Colore e testo esplicito (Verde [SI] / Rosso [NO])
-          const checkText = isPresent ? "[SI]" : "[NO]"; 
-          // Colore BGR (Verde BGR 100, 200, 100; Rosso BGR 200, 100, 100)
+
+          const checkText = isPresent ? "[SI]" : "[NO]";
           const textColor = isPresent ? [0, 150, 0] : [200, 0, 0]; // RGB
-          
-          doc.setTextColor(...textColor); 
-          
+
+          doc.setTextColor(...textColor);
+
           doc.text(`${checkText} ${item.label}`, 14 + (index % 2) * 90, yPos);
           if (index % 2 === 1) yPos += 6;
         });
@@ -975,7 +980,7 @@ const App = () => {
         yPos += 8;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(10);
-        
+
         if (logData.damages) {
           doc.setTextColor(200, 0, 0);
           doc.text(`DANNI: ${logData.damages}`, 14, yPos);
@@ -996,27 +1001,33 @@ const App = () => {
         doc.setFontSize(12);
         doc.text("FOTO ALLEGATE", 14, yPos);
         yPos += 8;
-        
+
         let xOffset = 14;
         const photoWidth = 50;
         const photoHeight = 50;
 
         logData.photos.forEach((photo: string, i: number) => {
           if (xOffset + photoWidth > pageWidth - 14) {
-            // Se non c'è più spazio orizzontale
             xOffset = 14;
-            yPos += photoHeight + 5; // Nuova riga
+            yPos += photoHeight + 5;
           }
-          if (yPos + photoHeight > 270) { // Controlla fine pagina
+          if (yPos + photoHeight > 270) {
             doc.addPage();
             yPos = 20;
             xOffset = 14;
             doc.setFontSize(10);
-            doc.text(`FOTO ALLEGATE (Continua) - Pagina ${doc.internal.pages.length - 1}`, 14, yPos);
+            doc.text(
+              `FOTO ALLEGATE (Continua) - Pagina ${
+                doc.internal.pages.length - 1
+              }`,
+              14,
+              yPos
+            );
             yPos += 8;
           }
-          
+
           try {
+            // Aggiungi immagine base64 al PDF
             doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
             xOffset += photoWidth + 5;
           } catch (e) {
@@ -1028,22 +1039,22 @@ const App = () => {
 
       // Sezione Firma
       if (logData.signature) {
-        if (yPos > 240) { // Inserisce in una nuova pagina se non c'è spazio
+        if (yPos > 240) {
           doc.addPage();
           yPos = 20;
         }
-        
+
         doc.setDrawColor(0, 0, 0);
         doc.line(14, yPos, pageWidth - 14, yPos);
         yPos += 10;
-        
-        // Testo Firma in nero
+
         doc.setFont("helvetica", "bold");
         doc.setFontSize(12);
-        doc.setTextColor(0, 0, 0); 
+        doc.setTextColor(0, 0, 0);
         doc.text("FIRMA PER ACCETTAZIONE", 14, yPos);
-        
+
         try {
+          // Aggiungi firma base64 al PDF
           doc.addImage(logData.signature, "PNG", 14, yPos + 5, 60, 30);
         } catch (e) {
           console.warn("Errore aggiunta firma al PDF", e);
@@ -1056,43 +1067,160 @@ const App = () => {
         doc.setFont("helvetica", "italic");
         doc.setTextColor(100, 100, 100);
         doc.text(
-          "In caso di danneggiamento la società si riserva il diritto di addebitare il costo di riparazione al dipendente,",
+          "In caso di danneggiamento la societ\xe0 si riserva il diritto di addebitare il costo di riparazione al dipendente,",
           14,
           yPos
         );
         doc.text(
-          "nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale.",
+          "nel caso in cui il danno ammonti ad un valore superiore ai 500\u20ac, nella misura del 20% dell'importo totale.",
           14,
           yPos + 4
         );
       }
-      
-      const dateStr = new Date(logData.date).toISOString().slice(0, 10);
-      const idStr = logData.tripId ? `_TRIP-${logData.tripId}` : "";
-      const filename = `${logData.plate}_${dateStr}${idStr}_${logData.type}.pdf`;
 
-      // LOGICA DI DOWNLOAD (Mobile vs PC)
-      if (isMobileDevice()) {
-          // Mobile: Apre direttamente in una nuova finestra/scheda con nome file
-          doc.output('dataurlnewwindow', {filename: filename}); 
-          setTimeout(() => {
-              showToast(`Verbale PDF generato e aperto per la condivisione.`, "success");
-          }, 500);
-      } else {
-          // PC: Download diretto
-          doc.save(filename);
-          showToast(`Verbale PDF scaricato.`, "success");
-      }
-
+      // Restituisce l'oggetto doc di jspdf
+      return doc;
     } catch (err) {
-      console.error(err);
-      showToast("Errore generazione PDF", "error");
+      console.error("Errore durante la creazione del PDF layout:", err);
+      return null;
+    }
+  };
+
+  // FUNZIONE per il download dallo storico (GENERAZIONE AL VOLO + DOWNLOAD FORZATO)
+  const generatePDF = (logData: any) => {
+    setGeneratingPdf(true);
+
+    const pdfDoc = generatePDFDocument(logData);
+
+    if (!pdfDoc) {
+      setGeneratingPdf(false);
+      showToast(
+        "Impossibile generare il PDF. Controllare la console per i dettagli.",
+        "error"
+      );
+      return;
+    }
+
+    const safeTripId = logData.tripId || "N/A";
+    const driverName = logData.driver || "N/A";
+    const datePart = formatShortDate(logData.date); // Data nel formato gg-mm-aaaa
+
+    // NUOVA NOMENCLATURA: Verbale ID#xxxx - targa - driver - data - Consegna/Rientro.pdf
+    const filename = `Verbale ID#${safeTripId} - ${logData.plate} - ${driverName} - ${datePart} - ${logData.type}.pdf`;
+
+    try {
+      // Usa doc.output('blob') per ottenere i dati binari
+      const pdfBlob = pdfDoc.output("blob");
+      const url = URL.createObjectURL(pdfBlob);
+
+      // Crea un link invisibile e forza il download
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url); // Rilascia la risorsa
+
+      showToast(
+        `Download avviato: '${filename}'. Apri il file dalla cartella Download.`,
+        "success"
+      );
+    } catch (e) {
+      console.error("Errore nel salvataggio/download del PDF (doc.output):", e);
+      showToast(
+        "Errore grave: Impossibile avviare il download del PDF.",
+        "error"
+      );
     } finally {
       setGeneratingPdf(false);
     }
   };
 
-  // --- LOGIN HANDLER (PUNTO 1) ---
+  // --- FUNZIONI DI GESTIONE MODALI ---
+  const openModal = (mode: string, vehicle: any = null) => {
+    // Solo Admin può aggiungere/modificare
+    if ((mode === "add" || mode === "edit") && authRole !== "admin") {
+      showToast(
+        "Accesso negato: solo gli amministratori possono modificare la flotta.",
+        "error"
+      );
+      return;
+    }
+    setModalMode(mode);
+    setSelectedVehicle(vehicle);
+    setSelectedLog(null); // Resetta log selezionato
+    const initCheck: any = {};
+    CHECKLIST_ITEMS.forEach((i) => (initCheck[i.id] = true));
+    setChecklist(initCheck);
+    setPhotos([]);
+    setSignature(null);
+
+    // Pre-fill per Edit o Transaction
+    if (vehicle) {
+      setFormData({
+        model: vehicle.model,
+        plate: vehicle.plate,
+        km: vehicle.km,
+        fuel: vehicle.fuel || "Pieno",
+        driver: vehicle.driver || "",
+        commessa: vehicle.commessa || "",
+        imageUrl: vehicle.imageUrl || "", // Carica l'immagine Base64 esistente
+        currentSignature: null, // Firma corrente
+      });
+    } else {
+      setFormData({
+        imageUrl: "", // Inizializza l'immagine Base64
+        currentSignature: null,
+      });
+    }
+  };
+
+  const openLogModal = (log: any) => {
+    setModalMode("editLog");
+    setSelectedLog(log);
+    setSelectedVehicle(null);
+    // PULISCI FIRMA: setSignature a null per forzare una nuova firma (PUNTO 3)
+    setSignature(null);
+    setChecklist(log.checklist || {});
+    setPhotos(log.photos || []);
+
+    setFormData({
+      km: log.km,
+      fuel: log.fuel,
+      notes: log.notes || "",
+      damages: log.damages || "",
+      // Passiamo la firma originale per il rendering
+      originalSignature: log.signature || null,
+      currentSignature: null, // Firma per la modifica
+    });
+  };
+
+  const closeModal = () => {
+    setModalMode(null);
+    setSelectedVehicle(null);
+    setSelectedLog(null);
+    setFormData({});
+  };
+
+  // Funzione per salvare la firma dalla modale a schermo intero (RIMOSSA LOGICA FULLSCREEN)
+  const handleSignatureSave = (base64Signature: string | null) => {
+    setSignature(base64Signature);
+    setFormData((prev: any) => ({
+      ...prev,
+      currentSignature: base64Signature,
+      // Se stiamo modificando, puliamo l'originale quando l'utente salva la nuova
+      originalSignature:
+        modalMode === "editLog" && base64Signature
+          ? null
+          : prev.originalSignature,
+    }));
+  };
+
+  // --- FUNZIONI DI GESTIONE (HANDLE...) ---
+
+  // FUNZIONE: Login (Punto 1)
   const handleLogin = (e: any) => {
     e.preventDefault();
     if (pinInput === PIN_UNICO) {
@@ -1109,7 +1237,167 @@ const App = () => {
     sessionStorage.removeItem("renco_auth_role");
   };
 
-  // --- ACTIONS ---
+  // FUNZIONE: Aggiungi Veicolo (Ripristinata con la tua sintassi)
+  const handleAddVehicle = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db) return;
+    try {
+      await addDoc(
+        collection(db, "artifacts", appId, "public", "data", "vehicles"),
+        {
+          model: formData.model,
+          plate: formData.plate.toUpperCase(),
+          km: parseInt(formData.km),
+          imageUrl: formData.imageUrl || null, // Immagine Base64
+          status: "disponibile",
+          fuel: "Pieno",
+          driver: null,
+          currentTripId: null,
+          commessa: null,
+        }
+      );
+      closeModal();
+      showToast("Veicolo aggiunto.", "success");
+    } catch (err) {
+      console.error(err);
+      showToast("Errore salvataggio.", "error");
+    }
+  };
+
+  // FUNZIONE: Modifica Veicolo (Ripristinata con la tua sintassi)
+  const handleEditVehicle = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db || !selectedVehicle) return;
+    try {
+      const vehicleRef = doc(
+        db,
+        "artifacts",
+        appId,
+        "public",
+        "data",
+        "vehicles",
+        selectedVehicle.id
+      );
+      await updateDoc(vehicleRef, {
+        model: formData.model,
+        plate: formData.plate.toUpperCase(),
+        km: parseInt(formData.km),
+        imageUrl: formData.imageUrl || null, // Immagine Base64
+      });
+      closeModal();
+      showToast("Dati veicolo aggiornati.", "success");
+    } catch (err) {
+      console.error(err);
+      showToast("Errore aggiornamento.", "error");
+    }
+  };
+
+  // FUNZIONE: Elimina Veicolo (Ripristinata con ConfirmationModal)
+  const deleteVehicle = async (id: string) => {
+    if (authRole !== "admin" || !db) return;
+
+    setConfirmModal({
+      isOpen: true,
+      title: "Conferma Eliminazione",
+      message:
+        "Sei sicuro di voler eliminare permanentemente questo veicolo? L'operazione è irreversibile.",
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          await deleteDoc(
+            doc(db, "artifacts", appId, "public", "data", "vehicles", id)
+          );
+          showToast("Veicolo eliminato.", "success");
+        } catch (err) {
+          showToast("Errore eliminazione.", "error");
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
+
+  // FUNZIONE: Modifica Log (Storico)
+  const handleEditLog = async (e: any) => {
+    e.preventDefault();
+    if (!db || !selectedLog) return;
+
+    // La nuova firma è obbligatoria per la modifica (signature è stato resettato a null in openLogModal)
+    // Usiamo `signature` che è aggiornato da handleSignatureSave
+    if (!signature && !selectedLog.signature) {
+      // Se non ho nuova firma e non avevo quella vecchia
+      showToast(
+        "Una firma è obbligatoria per confermare la modifica del report.",
+        "error"
+      );
+      return;
+    }
+
+    const logRef = getPublicDocRef("logs", selectedLog.id);
+
+    try {
+      // 1. Aggiorna i dati del log
+      await updateDoc(logRef, {
+        km: parseInt(formData.km) || selectedLog.km,
+        fuel: formData.fuel,
+        notes: formData.notes || "",
+        damages: formData.damages || "",
+        checklist: checklist,
+        signature: signature || selectedLog.signature, // Usa la nuova firma o quella precedente
+        photos: photos,
+        lastModified: new Date().toISOString(),
+      });
+
+      // 2. Trova il veicolo e aggiorna il suo stato KM/Fuel
+      const vehicle = vehicles.find((v) => v.id === selectedLog.vehicleId);
+      if (vehicle) {
+        const vehicleRef = getPublicDocRef("vehicles", vehicle.id);
+        // Aggiorna solo i campi km e fuel, in base all'ultimo log salvato
+        await updateDoc(vehicleRef, {
+          km: parseInt(formData.km) || vehicle.km,
+          fuel: formData.fuel,
+        });
+      }
+
+      closeModal();
+      showToast(
+        `Log #${selectedLog.tripId} modificato con successo.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      showToast("Errore durante la modifica del log.", "error");
+    }
+  };
+
+  // FUNZIONE: Elimina Log (Storico) - IMPLEMENTATA per il punto 2
+  const deleteLog = async (logId: string) => {
+    if (authRole !== "admin" || !db) {
+      showToast(
+        "Accesso negato: solo gli amministratori possono eliminare i report.",
+        "error"
+      );
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: "Conferma Eliminazione Report",
+      message:
+        "Sei sicuro di voler eliminare permanentemente questo report di movimento? L'eliminazione è irreversibile.",
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          await deleteDoc(getPublicDocRef("logs", logId));
+          showToast("Report di movimento eliminato.", "success");
+        } catch (err) {
+          showToast("Errore eliminazione report.", "error");
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
+
+  // FUNZIONE: Transazione Check-in / Check-out (SALVA LOG SU DB)
   const handleTransaction = async (e: any) => {
     e.preventDefault();
     if (!signature || !db) {
@@ -1117,15 +1405,12 @@ const App = () => {
       return;
     }
 
-    const type = modalMode === "checkout" ? "Consegna" : "Ritiro";
+    const type = modalMode === "checkout" ? "Consegna" : "Rientro"; // NOME AGGIORNATO
     const newStatus = modalMode === "checkout" ? "impegnato" : "disponibile";
 
-    if (
-      modalMode === "checkin" &&
-      parseInt(formData.km) < selectedVehicle.km
-    ) {
+    if (modalMode === "checkin" && parseInt(formData.km) < selectedVehicle.km) {
       showToast(
-        `I Km inseriti (${formData.km}) devono essere maggiori o uguali a quelli di uscita (${selectedVehicle.km}).`,
+        `I Km inseriti (${formData.km}) devono essere maggiori o uguali a quelli di Ritiro (${selectedVehicle.km}).`,
         "error"
       );
       return;
@@ -1135,6 +1420,7 @@ const App = () => {
       let tripId = selectedVehicle.currentTripId || null;
 
       if (modalMode === "checkout") {
+        // Genera il nuovo ID solo al Ritiro
         tripId = await getNextTripId(db);
       }
 
@@ -1162,7 +1448,16 @@ const App = () => {
         signature,
       };
 
-      const vehicleRef = getPublicDocRef("vehicles", selectedVehicle.id);
+      // Aggiorna il veicolo
+      const vehicleRef = doc(
+        db,
+        "artifacts",
+        appId,
+        "public",
+        "data",
+        "vehicles",
+        selectedVehicle.id
+      );
       await updateDoc(vehicleRef, {
         status: newStatus,
         driver: modalMode === "checkout" ? formData.driver : null,
@@ -1172,161 +1467,200 @@ const App = () => {
         commessa: modalMode === "checkout" ? formData.commessa : null,
       });
 
-      await addDoc(getPublicCollectionPath("logs"), logData);
-      
-      // La generazione del PDF è stata spostata qui e usa showToast
-      generatePDF(logData); 
-
-      // Se è un check-in e ci sono danni/note, invia notifica email
-      if (modalMode === "checkin" && (formData.damages || formData.notes) && window.emailjs) {
-        await sendDamageNotification(logData);
-      }
+      // Aggiunge il log
+      await addDoc(
+        collection(db, "artifacts", appId, "public", "data", "logs"),
+        logData
+      );
 
       closeModal();
-      showToast(`${type} completata con successo!`, "success");
+
+      // CHIAMATA PER SCARICARE IL PDF SUBITO DOPO IL SALVATAGGIO (Punto 1)
+      showToast(
+        `${type} completata con successo! Download del Verbale in corso...`,
+        "success"
+      );
+      generatePDF(logData);
     } catch (err) {
       console.error(err);
-      showToast("Errore salvataggio su Cloud.", "error");
+      showToast(
+        "Errore salvataggio su Cloud. La transazione non è riuscita.",
+        "error"
+      );
     }
   };
 
-  const sendDamageNotification = async (logData: any) => {
-    if (!EMAILJS_CONFIG.SERVICE_ID || !EMAILJS_CONFIG.TEMPLATE_ID) {
-      console.warn("EmailJS non configurato. Salto l'invio email.");
+  // FUNZIONE: Export Excel (Trip su riga singola)
+  const exportToExcelHack = (logsData: any[], filename: string) => {
+    if (logsData.length === 0) {
+      showToast("Nessun dato da esportare.", "error");
       return;
     }
 
-    const templateParams = {
-      trip_id: logData.tripId,
-      vehicle_model: logData.vehicleModel,
-      plate: logData.plate,
-      driver_name: logData.driver,
-      km: logData.km,
-      date: formatDate(logData.date),
-      damages: logData.damages || "Nessun danno grave segnalato.",
-      notes: logData.notes || "Nessuna nota aggiuntiva.",
-    };
+    // Aggregazione in un unico oggetto per Trip ID
+    const trips: any = {};
+    logsData.forEach((log: any) => {
+      const tid = log.tripId || "LEGACY";
+      if (!trips[tid]) {
+        trips[tid] = {
+          tripId: log.tripId,
+          vehicleModel: log.vehicleModel,
+          plate: log.plate,
+          commessa: log.commessa || "N/A",
+        };
+      }
 
-    try {
-      const response = await window.emailjs.send(
-        EMAILJS_CONFIG.SERVICE_ID,
-        "template_g250j58", // Usando un template generico se TEMPLATE_ID è vuoto, altrimenti usa il tuo
-        templateParams
-      );
-      console.log("Email inviata con successo:", response);
-      showToast("Notifica danni inviata via email.", "success");
-    } catch (error) {
-      console.error("Errore nell'invio dell'email:", error);
-      showToast("Attenzione: Impossibile inviare la notifica via email.", "error");
-    }
-  };
+      // Consegna (checkout) / Rientro (checkin)
+      const isConsegna = log.type === "Consegna";
+      const suffix = isConsegna ? "CONSEGNA" : "RIENTRO";
 
-  // --- Add/Edit Vehicle (PUNTO 3: GESTIONE FOTO BASE64) ---
-  const handleAddVehicle = async (e: any) => {
-    e.preventDefault();
-    if (authRole !== "admin" || !db) return;
-    try {
-      await addDoc(getPublicCollectionPath("vehicles"), {
-        model: formData.model,
-        plate: formData.plate.toUpperCase(),
-        km: parseInt(formData.km),
-        imageUrl: formData.imageUrl || null, // Immagine Base64
-        status: "disponibile",
-        fuel: "Pieno",
-        driver: null,
-        currentTripId: null,
-        commessa: null,
-      });
-      closeModal();
-      showToast("Veicolo aggiunto.", "success");
-    } catch (err) {
-      console.error(err);
-      showToast("Errore salvataggio.", "error");
-    }
-  };
+      // Aggiungi i dati del movimento
+      trips[tid][`Data ${suffix}`] = formatDate(log.date);
+      trips[tid][`Driver ${suffix}`] = log.driver || "N/A";
+      trips[tid][`Km ${suffix}`] = log.km;
+      trips[tid][`Fuel ${suffix}`] = log.fuel;
+      trips[tid][`Danni ${suffix}`] = log.damages || "";
+      trips[tid][`Note ${suffix}`] = log.notes || "";
 
-  const handleEditVehicle = async (e: any) => {
-    e.preventDefault();
-    if (authRole !== "admin" || !db || !selectedVehicle) return;
-    try {
-      const vehicleRef = getPublicDocRef("vehicles", selectedVehicle.id);
-      await updateDoc(vehicleRef, {
-        model: formData.model,
-        plate: formData.plate.toUpperCase(),
-        km: parseInt(formData.km),
-        imageUrl: formData.imageUrl || null, // Immagine Base64
-      });
-      closeModal();
-      showToast("Dati veicolo aggiornati.", "success");
-    } catch (err) {
-      console.error(err);
-      showToast("Errore aggiornamento.", "error");
-    }
-  };
-
-  const deleteVehicle = async (id: string) => {
-    if (authRole !== "admin" || !db) return;
-
-    setConfirmModal({
-      isOpen: true,
-      title: "Conferma Eliminazione",
-      message:
-        "Sei sicuro di voler eliminare permanentemente questo veicolo? L'operazione è irreversibile.",
-      onConfirm: async () => {
-        setConfirmModal({ isOpen: false });
-        try {
-          await deleteDoc(getPublicDocRef("vehicles", id));
-          showToast("Veicolo eliminato.", "success");
-        } catch (err) {
-          showToast("Errore eliminazione.", "error");
+      // La checklist è sempre la più recente (dal Rientro) o l'ultima registrazione
+      CHECKLIST_ITEMS.forEach((item) => {
+        // Usiamo la checklist del log più recente nel trip per la colonna finale
+        if (!trips[tid][item.label] || !isConsegna) {
+          trips[tid][item.label] = log.checklist?.[item.id] ? "SI" : "NO";
         }
-      },
-      onCancel: () => setConfirmModal({ isOpen: false }),
+      });
     });
+
+    const aggregatedTrips = Object.values(trips);
+
+    if (aggregatedTrips.length === 0) {
+      showToast("Nessun dato aggregato da esportare.", "error");
+      return;
+    }
+
+    // Separatore: Punto e Virgola (;) per compatibilità EU Excel
+    const SEPARATOR = ";";
+
+    // Intestazioni per il formato Trip Unico
+    const headers = [
+      "Trip ID",
+      "Modello Veicolo",
+      "Targa",
+      "Commessa",
+      "Data CONSEGNA",
+      "Driver CONSEGNA",
+      "Km CONSEGNA",
+      "Fuel CONSEGNA",
+      "Danni CONSEGNA",
+      "Note CONSEGNA",
+      "Data RIENTRO",
+      "Driver RIENTRO",
+      "Km RIENTRO",
+      "Fuel RIENTRO",
+      "Danni RIENTRO",
+      "Note RIENTRO",
+      ...CHECKLIST_ITEMS.map((item) => `Dotazione ${item.label}`),
+    ];
+
+    const csvRows = aggregatedTrips.map((trip: any) => {
+      // Funzione per pulire e avvolgere un campo di testo nelle virgolette (necessario per CSV/XLS)
+      const cleanAndQuote = (text: string | number | undefined) => {
+        if (text === null || text === undefined) return "";
+        let str = String(text).replace(/"/g, '""'); // Escapa le virgolette doppie
+        str = str.replace(/(\r\n|\n|\r)/gm, " "); // Rimuove newlines
+
+        // In Excel, avvolgere tutto tra virgolette doppie risolve molti problemi di formattazione
+        return `"${str}"`;
+      };
+
+      // Funzione che gestisce i dati che potrebbero essere interpretati male (Km, Frazioni)
+      const cleanExcelValue = (value: any) => {
+        if (value === undefined || value === null) return "";
+        let str = String(value);
+
+        // Se il valore è una frazione o un numero, aggiungi uno spazio iniziale per forzare la formattazione testuale
+        // ESEMPIO: " 1/4" -> Excel lo tratta come testo.
+        if (str.includes("/") || (/^\d+$/.test(str) && str.length > 1)) {
+          str = ` ${str}`;
+        }
+
+        // Ritorna la stringa pulita
+        return cleanAndQuote(str);
+      };
+
+      const checklistValues = CHECKLIST_ITEMS.map(
+        (item) => trip[item.label] || "N/A"
+      );
+
+      return [
+        cleanAndQuote(`#${trip.tripId || "N/A"}`),
+        cleanAndQuote(trip.vehicleModel),
+        cleanAndQuote(trip.plate),
+        cleanAndQuote(trip.commessa),
+
+        cleanAndQuote(trip["Data CONSEGNA"] || ""),
+        cleanAndQuote(trip["Driver CONSEGNA"] || ""),
+        cleanExcelValue(trip["Km CONSEGNA"] || ""),
+        cleanExcelValue(trip["Fuel CONSEGNA"] || ""),
+        cleanAndQuote(trip["Danni CONSEGNA"] || ""),
+        cleanAndQuote(trip["Note CONSEGNA"] || ""),
+
+        cleanAndQuote(trip["Data RIENTRO"] || ""),
+        cleanAndQuote(trip["Driver RIENTRO"] || ""),
+        cleanExcelValue(trip["Km RIENTRO"] || ""),
+        cleanExcelValue(trip["Fuel RIENTRO"] || ""),
+        cleanAndQuote(trip["Danni RIENTRO"] || ""),
+        cleanAndQuote(trip["Note RIENTRO"] || ""),
+
+        ...checklistValues.map((val) => cleanAndQuote(val)),
+      ].join(SEPARATOR);
+    });
+
+    // Inserisce il Byte Order Mark (BOM) per garantire la corretta interpretazione di UTF-8 in Excel
+    const csvContent = [headers.join(SEPARATOR), ...csvRows].join("\n");
+
+    // Crea un BLOB con codifica UTF-8 e MIME type per EXCEL (compatibile XLS)
+    const blob = new Blob(["\ufeff", csvContent], {
+      type: "application/vnd.ms-excel;charset=utf-8;", // MIME type per XLS (compatibile XLS)
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.setAttribute("href", url);
+    // Assicura l'estensione .xls
+    link.setAttribute("download", filename.replace(".xls", ".xls"));
+
+    link.style.visibility = "hidden";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    // Messaggio di successo amichevole
+    showToast(
+      "Report Export Completato! Il file XLS è pronto nella cartella Download.",
+      "success"
+    );
   };
 
-  // --- RENDER HELPER ---
-  const renderChecklist = () => (
-    <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
-      <label className="block text-sm font-bold text-gray-700 mb-2 flex items-center gap-2">
-        <FileText className="w-4 h-4" /> Dotazioni
-      </label>
-      <div className="grid grid-cols-2 gap-2">
-        {CHECKLIST_ITEMS.map((item) => (
-          <label
-            key={item.id}
-            className="flex items-center space-x-2 text-sm cursor-pointer"
-          >
-            <input
-              type="checkbox"
-              className="rounded text-orange-600 border-gray-300 focus:ring-orange-500"
-              checked={checklist[item.id] || false}
-              onChange={(e) =>
-                setChecklist({ ...checklist, [item.id]: e.target.checked })
-              }
-            />
-            <span>{item.label}</span>
-          </label>
-        ))}
-      </div>
-    </div>
-  );
+  // --- RENDERING COMPONENTI MODALI E SELETTORI ---
 
   const renderFuelSelector = () => (
     <div>
       <label className="block text-sm font-medium text-gray-700 mb-1">
-        Carburante
+        Livello Carburante Attuale
       </label>
-      <div className="flex rounded-lg shadow-inner bg-gray-100 p-1">
+      <div className="flex gap-2 p-2 bg-gray-50 rounded-lg border">
         {FUEL_LEVELS.map((level) => (
           <button
             key={level}
             type="button"
             onClick={() => setFormData({ ...formData, fuel: level })}
-            className={`flex-1 py-2 text-xs font-medium rounded-lg transition-all ${
+            className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all border ${
               formData.fuel === level
-                ? "bg-white text-orange-600 shadow-md ring-1 ring-orange-500"
-                : "text-gray-500 hover:bg-gray-200"
+                ? "bg-orange-600 text-white border-orange-700 shadow-md"
+                : "bg-white text-gray-700 hover:bg-gray-100 border-gray-200"
             }`}
           >
             {level}
@@ -1336,534 +1670,76 @@ const App = () => {
     </div>
   );
 
-  const openModal = (mode: string, vehicle: any = null) => {
-    // Solo Admin può aggiungere/modificare
-    if (
-      (mode === "add" || mode === "edit") &&
-      authRole !== "admin"
-    ) {
-      showToast("Accesso negato: solo gli amministratori possono modificare la flotta.", "error");
-      return;
-    }
-    setModalMode(mode);
-    setSelectedVehicle(vehicle);
-    const initCheck: any = {};
-    CHECKLIST_ITEMS.forEach((i) => (initCheck[i.id] = true));
-    setChecklist(initCheck);
-    setPhotos([]);
-    setSignature(null);
-
-    // Pre-fill per Edit o Transaction
-    if (vehicle) {
-      setFormData({
-        model: vehicle.model,
-        plate: vehicle.plate,
-        km: vehicle.km,
-        fuel: vehicle.fuel || "Pieno",
-        driver: vehicle.driver || "",
-        commessa: vehicle.commessa || "",
-        imageUrl: vehicle.imageUrl || "", // Carica l'immagine Base64 esistente
-      });
-    } else {
-      setFormData({
-        imageUrl: "", // Inizializza l'immagine Base64
-      });
-    }
-  };
-  const closeModal = () => {
-    setModalMode(null);
-    setSelectedVehicle(null);
-    setFormData({});
-  };
-
-  // --- VIEWS ---
-  const renderLogin = () => (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm text-center border-t-4 border-orange-600">
-        <div className="w-16 h-16 bg-orange-100 text-orange-600 rounded-full flex items-center justify-center mx-auto mb-4">
-          <Lock className="w-8 h-8" />
-        </div>
-        <h1 className="text-2xl font-bold text-gray-800 mb-2">
-          Accesso Renco Fleet
-        </h1>
-        <p className="text-gray-500 mb-6 text-sm">
-          Inserisci il PIN per accedere come Amministratore.
-        </p>
-
-        <form onSubmit={handleLogin} className="space-y-4">
-          <input
-            type="password"
-            className="w-full text-center text-2xl tracking-widest p-3 border rounded-lg focus:ring-2 focus:ring-orange-500 outline-none font-mono"
-            placeholder="PIN"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            autoFocus
-          />
-          <Button type="submit" className="w-full justify-center">
-            <LogIn className="w-4 h-4" /> Accedi
-          </Button>
-        </form>
+  const renderChecklist = () => (
+    <div>
+      <h4 className="text-sm font-bold text-gray-700 mb-2 flex items-center gap-2">
+        <FileText className="w-4 h-4" /> Dotazioni (Checklist)
+      </h4>
+      <div className="grid grid-cols-2 gap-3 bg-gray-50 p-4 rounded-xl border">
+        {CHECKLIST_ITEMS.map((item) => (
+          <div key={item.id} className="flex items-center">
+            <input
+              id={item.id}
+              type="checkbox"
+              checked={!!checklist[item.id]}
+              onChange={(e) =>
+                setChecklist({
+                  ...checklist,
+                  [item.id]: e.target.checked,
+                })
+              }
+              className="h-4 w-4 text-orange-600 border-gray-300 rounded focus:ring-orange-500"
+            />
+            <label
+              htmlFor={item.id}
+              className="ml-2 block text-sm font-medium text-gray-700 select-none"
+            >
+              {item.label}
+            </label>
+          </div>
+        ))}
       </div>
     </div>
   );
 
-  const renderDashboard = () => {
-    const isUser = authRole === "admin";
-    
-    // Filtra i veicoli in base alla ricerca Dashboard
-    const filteredVehicles = vehicles.filter(
-      (v) =>
-        v.plate?.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.model?.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.driver?.toLowerCase().includes(searchDashboardTerm.toLowerCase())
-    );
-
-    const available = filteredVehicles.filter(
-      (v) => v.status === "disponibile"
-    ).length;
-    const busy = filteredVehicles.filter(
-      (v) => v.status === "impegnato"
-    ).length;
-
-    return (
-      <div className="space-y-6">
-        {permissionError && (
-          <div className="bg-red-100 p-4 text-red-800 rounded-xl border border-red-200 flex items-center gap-3 font-medium">
-            <ShieldAlert className="w-5 h-5" /> Errore Permessi Database: I dati
-            potrebbero non essere aggiornati in tempo reale.
-          </div>
-        )}
-
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-          <h2 className="text-2xl font-bold text-gray-800">Dashboard Flotta</h2>
-
-          <div className="flex items-center gap-3">
-            {/* Barra Ricerca Dashboard */}
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                className="pl-9 pr-4 py-2 border rounded-full text-sm focus:ring-2 focus:ring-orange-500 outline-none w-full md:w-64 transition-all"
-                placeholder="Cerca targa, modello, driver..."
-                value={searchDashboardTerm}
-                onChange={(e) => setSearchDashboardTerm(e.target.value)}
-                disabled={!isUser || loadingData}
-              />
-            </div>
-            <div className="flex items-center gap-2 text-green-600 text-xs font-medium bg-white px-3 py-1.5 rounded-full border border-green-200 shadow-sm">
-              <Zap className="w-3 h-3 animate-pulse" /> Live Sync
-            </div>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <Card className="p-4 border-l-4 border-orange-500 flex items-center gap-3">
-            <Car className="w-8 h-8 text-orange-600 bg-orange-100 p-1 rounded-full shrink-0" />
-            <div>
-              <p className="text-sm text-gray-500">Totale Veicoli</p>
-              <h3 className="text-2xl font-bold">
-                {loadingData ? <Loader2 className="w-6 h-6 animate-spin" /> : filteredVehicles.length}
-              </h3>
-            </div>
-          </Card>
-          <Card className="p-4 border-l-4 border-green-500 flex items-center gap-3">
-            <CheckCircle className="w-8 h-8 text-green-600 bg-green-100 p-1 rounded-full shrink-0" />
-            <div>
-              <p className="text-sm text-gray-500">Disponibili</p>
-              <h3 className="text-2xl font-bold">{available}</h3>
-            </div>
-          </Card>
-          <Card className="p-4 border-l-4 border-red-500 flex items-center gap-3">
-            <Users className="w-8 h-8 text-red-600 bg-red-100 p-1 rounded-full shrink-0" />
-            <div>
-              <p className="text-sm text-gray-500">In Uso</p>
-              <h3 className="text-2xl font-bold">{busy}</h3>
-            </div>
-          </Card>
-        </div>
-        
-        {loadingData && (
-          <div className="text-center p-8 text-gray-500">
-             <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" /> Caricamento dati...
-          </div>
-        )}
-
-        <div className="grid md:grid-cols-2 gap-4">
-          {filteredVehicles
-            .filter((v) => v.status === "disponibile")
-            .map((v) => (
-              <Card
-                key={v.id}
-                className="p-4 hover:shadow-lg transition-shadow flex justify-between items-center"
-              >
-                <div className="flex items-center gap-3">
-                  {v.imageUrl ? (
-                    <img
-                      src={v.imageUrl}
-                      alt={v.model}
-                      className="w-10 h-10 object-cover rounded-full shrink-0 border border-green-300"
-                      onError={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        target.onerror = null;
-                        target.src = "https://placehold.co/40x40/059669/ffffff?text=C";
-                      }}
-                    />
-                  ) : (
-                    <div className="w-10 h-10 bg-green-100 rounded-full flex items-center justify-center shrink-0">
-                      <Car className="text-green-600 w-5 h-5" />
-                    </div>
-                  )}
-                  <div>
-                    <h4 className="font-bold">{v.model}</h4>
-                    <p className="text-sm text-gray-500">{v.plate}</p>
-                    <p className="text-xs text-gray-400 mt-0.5">Km: {v.km} | Fuel: {v.fuel}</p>
-                  </div>
-                </div>
-                <Button 
-                  onClick={() => openModal("checkout", v)}
-                  className="w-auto px-6 py-2"
-                  disabled={!isUser}
-                >
-                  Consegna <ArrowRight className="w-4 h-4" />
-                </Button>
-              </Card>
-            ))}
-          {filteredVehicles
-            .filter((v) => v.status === "impegnato")
-            .map((v) => (
-              <Card
-                key={v.id}
-                className="p-4 border-l-4 border-red-200 bg-red-50/30 flex justify-between items-center"
-              >
-                <div className="flex items-center gap-3">
-                  {v.imageUrl ? (
-                    <img
-                      src={v.imageUrl}
-                      alt={v.model}
-                      className="w-10 h-10 object-cover rounded-full shrink-0 border border-red-300"
-                      onError={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        target.onerror = null;
-                        target.src = "https://placehold.co/40x40/dc2626/ffffff?text=C";
-                      }}
-                    />
-                  ) : (
-                    <div className="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center shrink-0">
-                      <User className="text-red-600 w-5 h-5" />
-                    </div>
-                  )}
-                  <div>
-                    <h4 className="font-bold">{v.model}</h4>
-                    <p className="text-sm text-gray-700">
-                      <span className="font-mono font-bold mr-1">
-                        {v.plate}
-                      </span>
-                      • {v.driver}
-                    </p>
-                    <p className="text-xs text-gray-500 mt-0.5">
-                      Trip #{v.currentTripId} {v.commessa ? `(Commessa: ${v.commessa})` : ''}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="secondary"
-                  onClick={() => openModal("checkin", v)}
-                  className="w-auto px-6 py-2"
-                  disabled={!isUser}
-                >
-                  Rientro
-                </Button>
-              </Card>
-            ))}
-        </div>
-      </div>
-    );
-  };
-
-  const renderFleet = () => {
-    const isManager = authRole === "admin";
-    
-    const filteredFleet = vehicles.filter(
-      (v) =>
-        v.plate?.toLowerCase().includes(searchFleetTerm.toLowerCase()) ||
-        v.model?.toLowerCase().includes(searchFleetTerm.toLowerCase())
-    );
-    return (
-      <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <h2 className="text-2xl font-bold">Gestione Flotta</h2>
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                className="pl-9 pr-4 py-2 border rounded-lg w-full"
-                placeholder="Cerca targa/modello..."
-                value={searchFleetTerm}
-                onChange={(e) => setSearchFleetTerm(e.target.value)}
-                disabled={!isManager}
-              />
-            </div>
-            <Button onClick={() => openModal("add")} className="w-auto px-6" disabled={!isManager}>
-              <Plus className="w-4 h-4" /> Nuovo
-            </Button>
-          </div>
-        </div>
-        <Card>
-          {loadingData ? (
-            <div className="text-center p-8 text-gray-500">
-              <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" /> Caricamento flotta...
-            </div>
-          ) : (
-            <table className="w-full text-sm text-left">
-              <thead className="bg-gray-50 border-b">
-                <tr className="text-gray-600 uppercase tracking-wider">
-                  <th className="p-3">Modello</th>
-                  <th className="p-3">Targa</th>
-                  <th className="p-3">Km</th>
-                  <th className="p-3">Stato</th>
-                  <th className="p-3">Driver</th>
-                  <th className="p-3 text-right">Azioni</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {filteredFleet.map((v) => (
-                  <tr key={v.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="p-3 font-medium flex items-center gap-2">
-                        {v.imageUrl ? (
-                          <img
-                            src={v.imageUrl}
-                            alt={v.model}
-                            className="w-6 h-6 object-cover rounded-full border"
-                            onError={(e) => {
-                              const target = e.target as HTMLImageElement;
-                              target.onerror = null;
-                              target.src = "https://placehold.co/24x24/10b981/ffffff?text=C";
-                            }}
-                          />
-                        ) : (
-                          <Car className="w-5 h-5 text-gray-500" />
-                        )}
-                        {v.model}
-                    </td>
-                    <td className="p-3 font-mono text-gray-700">{v.plate}</td>
-                    <td className="p-3 text-gray-600">{v.km}</td>
-                    <td className="p-3">
-                      <Badge status={v.status} />
-                    </td>
-                    <td className="p-3 text-gray-500 text-xs">
-                      {v.status === "impegnato" ? (v.driver || "N/A") : "-"}
-                    </td>
-                    <td className="p-3 text-right flex justify-end gap-2">
-                      <button
-                        onClick={() => openModal("edit", v)}
-                        className="text-blue-500 hover:bg-blue-50 p-2 rounded-full disabled:opacity-50"
-                        title="Modifica"
-                        disabled={!isManager}
-                      >
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => deleteVehicle(v.id)}
-                        className="text-red-500 hover:bg-red-50 p-2 rounded-full disabled:opacity-50"
-                        title="Elimina"
-                        disabled={!isManager}
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </Card>
-      </div>
-    );
-  };
-
-  const renderHistory = () => {
-    // Raggruppa per Trip ID
-    const filteredLogs = logs.filter(
-      (l) =>
-        l.driver?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        l.plate?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        l.tripId?.includes(searchTerm)
-    );
-    
-    // Aggregazione in un unico oggetto per Trip ID
-    const trips: any = {};
-    filteredLogs.forEach((log) => {
-      const tid = log.tripId || "LEGACY";
-      if (!trips[tid]) trips[tid] = { id: tid, logs: [] };
-      trips[tid].logs.push(log);
-    });
-    
-    // Ordina i Trip ID in base alla data del log più recente nel trip
-    const sortedTripIds = Object.keys(trips).sort((a, b) => {
-      const logsA = trips[a].logs;
-      const logsB = trips[b].logs;
-      const latestDateA = logsA.reduce((max: Date, log: any) => 
-        (new Date(log.date).getTime() > max.getTime() ? new Date(log.date) : max), new Date(0));
-      const latestDateB = logsB.reduce((max: Date, log: any) => 
-        (new Date(log.date).getTime() > max.getTime() ? new Date(log.date) : max), new Date(0));
-      return latestDateB.getTime() - latestDateA.getTime();
-    });
-    
-    // Estrae tutti i log filtrati per l'esportazione
-    const allFilteredLogs = sortedTripIds.flatMap(tid => trips[tid].logs);
-
-
-    return (
-      <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-          <h2 className="text-2xl font-bold">Storico Viaggi</h2>
-          <div className="flex items-center gap-3 w-full sm:w-auto">
-            <div className="relative flex-1 sm:w-64">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-              <input
-                className="pl-9 pr-4 py-2 border rounded-lg w-full"
-                placeholder="Cerca Targa, Driver o Trip ID..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                disabled={loadingData}
-              />
-            </div>
-            {/* PUNTO 4: Bottone di Esportazione Excel (.xls) */}
-            <Button
-              onClick={() => exportToExcelHack(allFilteredLogs, `Renco_Storico_${new Date().toISOString().slice(0, 10)}.xls`)}
-              className="w-auto px-4 py-2 text-sm"
-              variant="secondary"
-              disabled={loadingData || allFilteredLogs.length === 0}
-            >
-              <Download className="w-4 h-4" /> Esporta Excel
-            </Button>
-          </div>
-        </div>
-
-        {loadingData ? (
-          <div className="text-center p-8 text-gray-500">
-              <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" /> Caricamento storico movimenti...
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {sortedTripIds.map((tid) => {
-              const trip = trips[tid];
-              // Un trip è chiuso se contiene sia Consegna che Ritiro, o solo Consegna (ancora in corso)
-              const checkinLog = trip.logs.find((l: any) => l.type === "Ritiro");
-              const checkoutLog = trip.logs.find((l: any) => l.type === "Consegna");
-              const isClosed = !!checkinLog;
-              const mainLog = checkoutLog || trip.logs[0]; // Usa il checkout come principale se esiste
-
-              return (
-                <div
-                  key={tid}
-                  className={`bg-white rounded-xl shadow-md border-l-4 overflow-hidden transition-all duration-300 ${
-                    isClosed ? "border-green-500" : "border-orange-500"
-                  }`}
-                >
-                  <div className="bg-gray-50 p-4 border-b flex flex-col sm:flex-row justify-between items-start sm:items-center">
-                    <div>
-                      <h4 className="font-bold text-gray-800 flex items-center gap-2">
-                        <Car className="w-4 h-4" /> TRIP ID: #{tid}
-                        {isClosed ? (
-                          <span className="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-medium">
-                            Completato
-                          </span>
-                        ) : (
-                          <span className="bg-orange-100 text-orange-700 text-xs px-2 py-0.5 rounded-full font-medium">
-                            In Corso
-                          </span>
-                        )}
-                      </h4>
-                      <div className="text-sm text-gray-600 mt-1">
-                        **{mainLog.vehicleModel}** - {mainLog.plate} |{" "}
-                        Driver: **{mainLog.driver}**
-                        {mainLog.commessa && (
-                          <span className="ml-2 text-gray-500 text-xs">
-                            (Commessa: {mainLog.commessa})
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="divide-y divide-gray-100">
-                    {trip.logs
-                      .sort(
-                        (a: any, b: any) =>
-                          new Date(a.date).getTime() - new Date(b.date).getTime()
-                      )
-                      .map((l: any, index: number) => (
-                        <div
-                          key={l.id}
-                          className="p-3 flex justify-between items-center hover:bg-gray-50 transition-colors"
-                        >
-                          <div className="flex items-center gap-3">
-                            <div
-                              className={`p-2 rounded-full shrink-0 ${
-                                l.type === "Consegna"
-                                  ? "bg-blue-50 text-blue-600"
-                                  : "bg-purple-50 text-purple-600"
-                              }`}
-                            >
-                              {l.type === "Consegna" ? (
-                                <ArrowRight className="w-4 h-4" />
-                              ) : (
-                                <CheckCircle className="w-4 h-4" />
-                              )}
-                            </div>
-                            <div>
-                              <div className="font-medium text-sm">
-                                {l.type} - {l.driver}
-                                {l.damages && <span className="text-red-500 ml-2 font-bold">(Danni Segnalati)</span>}
-                              </div>
-                              <div className="text-xs text-gray-500 mt-0.5">
-                                {formatDate(l.date)} - Km: {l.km} - Fuel: {l.fuel}
-                              </div>
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => generatePDF(l)}
-                            className="text-orange-600 hover:text-orange-800 text-xs flex items-center gap-1 font-medium transition-colors p-2 rounded hover:bg-orange-50 shrink-0"
-                            disabled={generatingPdf}
-                          >
-                            {generatingPdf ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileDown className="w-3 h-3" />} PDF
-                          </button>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    );
-  };
+  // RIMOSSA LA FUNZIONE renderFullScreenSignatureModal
 
   const renderModal = () => {
-    if (!modalMode) return null;
-    const isCheckout = modalMode === "checkout";
+    if (!modalMode || modalMode === "editLog") return null; // Non renderizza qui se è editLog
+    const isConsegna = modalMode === "checkout";
     const isEdit = modalMode === "edit";
     const isAdd = modalMode === "add";
+
+    // Nomi movimenti nel titolo della modale
+    const movementName = isConsegna ? "Consegna" : "Rientro";
+
+    // Determina la firma da mostrare nel piccolo box di anteprima
+    const currentSignature =
+      signature || (modalMode === "editLog" ? selectedLog?.signature : null);
 
     return (
       <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm">
         <div className="flex min-h-full items-center justify-center p-4 text-center">
-          <Card className="w-full max-w-lg max-h-[90vh] transform text-left align-middle transition-all overflow-y-auto">
+          {/* MODIFICATO: rimosso il max-w su tutti i breakpoint per permettere l'espansione massima sul mobile */}
+          <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
             <div className="p-6">
               <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
                 <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
                   {isAdd && <Plus className="w-5 h-5 text-orange-600" />}
                   {isEdit && <Pencil className="w-5 h-5 text-blue-600" />}
-                  {isCheckout && <ArrowRight className="w-5 h-5 text-green-600" />}
-                  {modalMode === "checkin" && <CheckCircle className="w-5 h-5 text-red-600" />}
-                  
+                  {/* Il pulsante Consegna è stato spostato sul rosso, quindi l'icona qui è coerente */}
+                  {isConsegna && (
+                    <ArrowRight className="w-5 h-5 text-red-600" />
+                  )}
+                  {!isConsegna && !isAdd && !isEdit && (
+                    <CheckCircle className="w-5 h-5 text-green-600" />
+                  )}
+
                   {isAdd
-                    ? "Nuovo Veicolo"
+                    ? "Nuovo Mezzo"
                     : isEdit
                     ? `Modifica Veicolo: ${selectedVehicle?.model}`
-                    : `${isCheckout ? "Consegna" : "Rientro"}: ${
-                        selectedVehicle?.model
-                      }`}
+                    : `${movementName}: ${selectedVehicle?.model}`}
                 </h3>
                 <button
                   type="button"
@@ -1924,42 +1800,48 @@ const App = () => {
                     />
                   </div>
                   {/* Componente per l'upload di una singola foto Base64 */}
-                  <VehiclePhotoUpload 
-                    imageUrl={formData.imageUrl} 
-                    setImageUrl={(url: string) => setFormData({...formData, imageUrl: url})} 
+                  <VehiclePhotoUpload
+                    imageUrl={formData.imageUrl}
+                    setImageUrl={(url: string) =>
+                      setFormData({ ...formData, imageUrl: url })
+                    }
                     onShowToast={showToast}
                   />
-                  
+
                   <div className="flex gap-3 pt-2">
-                    <Button variant="secondary" onClick={closeModal}>
+                    <Button
+                      variant="secondary"
+                      onClick={closeModal}
+                      className="w-auto"
+                    >
                       Annulla
                     </Button>
-                    <Button type="submit">
-                      {isAdd ? "Salva Veicolo" : "Aggiorna Dati"}
+                    <Button variant="admin" type="submit" className="w-auto">
+                      {isAdd ? "Salva Mezzo" : "Aggiorna Dati"}
                     </Button>
                   </div>
                 </form>
               ) : (
-                // MODULO MOVIMENTI (Check-in / Check-out)
+                // MODULO MOVIMENTI (Consegna / Rientro)
                 <form onSubmit={handleTransaction} className="space-y-4">
-                  {/* Riepilogo Dati Uscita (solo Check-in) */}
-                  {modalMode === "checkin" && selectedVehicle && (
+                  {/* Riepilogo Dati Uscita (solo Rientro) */}
+                  {!isConsegna && selectedVehicle && (
                     <div className="grid grid-cols-2 gap-4 bg-orange-50 p-4 rounded-xl border border-orange-200">
                       <div>
                         <span className="text-xs text-orange-700 uppercase font-bold">
-                          Driver Uscita
+                          Driver Consegna
                         </span>
                         <br />
                         <strong className="text-gray-900 text-lg">
                           {selectedVehicle.driver || "N/A"}
                         </strong>
                         <p className="text-xs text-gray-600 mt-1">
-                            Commessa: {selectedVehicle.commessa || "N/A"}
+                          Commessa: {selectedVehicle.commessa || "N/A"}
                         </p>
                       </div>
                       <div>
                         <span className="text-xs text-orange-700 uppercase font-bold">
-                          Km Uscita
+                          Km Consegna
                         </span>
                         <br />
                         <strong className="text-gray-900 text-lg">
@@ -1974,7 +1856,7 @@ const App = () => {
 
                   {/* Dati Obbligatori (Driver / Km Attuali) */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {isCheckout && (
+                    {isConsegna && (
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           Nome Cognome Driver
@@ -2007,16 +1889,17 @@ const App = () => {
                         required
                         min={selectedVehicle?.km || 0}
                       />
-                      {modalMode === "checkin" && parseInt(formData.km) < selectedVehicle?.km && (
-                        <p className="text-xs text-red-500 mt-1">
-                          Attenzione: Km inferiori a quelli di uscita.
-                        </p>
-                      )}
+                      {!isConsegna &&
+                        parseInt(formData.km) < selectedVehicle?.km && (
+                          <p className="text-xs text-red-500 mt-1">
+                            Attenzione: Km inferiori a quelli di Consegna.
+                          </p>
+                        )}
                     </div>
                   </div>
-                  
-                  {/* Commessa (solo Check-out) */}
-                  {isCheckout && (
+
+                  {/* Commessa (solo Consegna) */}
+                  {isConsegna && (
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Commessa (Opzionale)
@@ -2037,7 +1920,7 @@ const App = () => {
                   <div className="bg-red-50 p-3 rounded-lg border border-red-100">
                     <label className="text-sm font-bold text-red-700 flex items-center gap-1 mb-2">
                       <AlertTriangle className="w-4 h-4" />{" "}
-                      {isCheckout
+                      {isConsegna
                         ? "Danni Preesistenti (Opzionale)"
                         : "Nuovi Danni / Anomalie (Importante)"}
                     </label>
@@ -2049,7 +1932,7 @@ const App = () => {
                         setFormData({ ...formData, damages: e.target.value })
                       }
                       placeholder={
-                        isCheckout
+                        isConsegna
                           ? "Segnala graffi o danni già presenti (Opzionale)..."
                           : "Descrivi chiaramente eventuali nuovi danni o anomalie riscontrate (Obbligatorio se presenti)..."
                       }
@@ -2069,22 +1952,45 @@ const App = () => {
                       placeholder="Altre info utili..."
                     ></textarea>
                   </div>
-                  <PhotoUpload photos={photos} setPhotos={setPhotos} onShowToast={showToast} />
-                  <SignaturePad
-                    onSave={setSignature}
-                    label="Firma Driver per Accettazione"
-                    disclaimer={
-                      isCheckout
-                        ? "In caso di danneggiamento la società si riserva il diritto di addebitare il costo di riparazione al dipendente, nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
-                        : null
-                    }
+                  <PhotoUpload
+                    photos={photos}
+                    setPhotos={setPhotos}
+                    onShowToast={showToast}
                   />
+
+                  {/* SEZIONE FIRMA STANDARD (Modale unica) */}
+                  <div className="md:col-span-full">
+                    <SignaturePad
+                      onSave={handleSignatureSave}
+                      label="Firma Driver per Accettazione"
+                      setFormData={setFormData}
+                      initialSignature={signature || selectedVehicle?.signature}
+                      disclaimer={
+                        isConsegna
+                          ? "In caso di danneggiamento la società si riserva il diritto di addebitare il costo di riparazione al dipendente, nel caso in cui il danno ammonti ad un valore superiore ai 500€, nella misura del 20% dell'importo totale."
+                          : null
+                      }
+                    />
+                  </div>
+
                   <div className="flex gap-3 pt-4 sticky bottom-0 bg-white border-t pt-4">
-                    <Button variant="secondary" onClick={closeModal}>
+                    <Button
+                      variant="secondary"
+                      onClick={closeModal}
+                      className="w-auto"
+                    >
                       Annulla
                     </Button>
-                    <Button type="submit" loading={generatingPdf} disabled={generatingPdf}>
-                      {generatingPdf ? 'Generazione PDF...' : isCheckout ? "Conferma Consegna" : "Conferma Rientro"}
+                    {/* Testo aggiornato in Consegna/Rientro */}
+                    <Button
+                      type="submit"
+                      loading={generatingPdf}
+                      disabled={generatingPdf || !signature}
+                      className="w-auto"
+                    >
+                      {isConsegna
+                        ? "Conferma Consegna e Salva"
+                        : "Conferma Rientro e Salva"}
                     </Button>
                   </div>
                 </form>
@@ -2096,19 +2002,853 @@ const App = () => {
     );
   };
 
-  // Se l'auth non è pronto, mostra un loader iniziale (opzionale)
-  if (!isAuthReady || authRole === "guest") {
-    if (!isAuthReady) {
-      return (
-        <div className="min-h-screen flex items-center justify-center bg-slate-50">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-600" />
+  const renderLogModal = () => {
+    if (modalMode !== "editLog" || !selectedLog) return null; // Non renderizza qui se è editLog
+
+    // Determina la firma da mostrare nel piccolo box di anteprima (priorità alla nuova firma, poi all'originale)
+    const currentSignature = signature || selectedLog.signature;
+
+    // ... Logica di rendering Modifica Log
+    return (
+      <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm">
+        <div className="flex min-h-full items-center justify-center p-4 text-center">
+          {/* Rimosso max-w per l'espansione della firma */}
+          <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
+            <div className="p-6">
+              <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
+                <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
+                  <Pencil className="w-5 h-5 text-purple-600" />
+                  Modifica Log #{selectedLog.tripId} ({selectedLog.type})
+                </h3>
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="p-1 rounded-full hover:bg-gray-100 text-gray-500 hover:text-gray-900"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <form onSubmit={handleEditLog} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4 bg-gray-50 p-4 rounded-xl border border-gray-200 text-sm">
+                  <div>
+                    <span className="text-xs text-gray-500 uppercase font-bold">
+                      Veicolo
+                    </span>
+                    <br />
+                    <strong className="text-gray-900">
+                      {selectedLog.vehicleModel}
+                    </strong>
+                    <p className="text-xs text-gray-600">{selectedLog.plate}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs text-gray-500 uppercase font-bold">
+                      Driver Originale
+                    </span>
+                    <br />
+                    <strong className="text-gray-900">
+                      {selectedLog.driver}
+                    </strong>
+                    <p className="text-xs text-gray-600">
+                      {formatDate(selectedLog.date)}
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Km Attuali (Revisione)
+                  </label>
+                  <input
+                    type="number"
+                    className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                    value={formData.km || ""}
+                    onChange={(e) =>
+                      setFormData({ ...formData, km: e.target.value })
+                    }
+                    required
+                    min={selectedLog.km} // Usa il km del log originale come minimo
+                  />
+                </div>
+                {renderFuelSelector()}
+                {renderChecklist()}
+
+                <div className="bg-red-50 p-3 rounded-lg border border-red-100">
+                  <label className="text-sm font-bold text-red-700 flex items-center gap-1 mb-2">
+                    <AlertTriangle className="w-4 h-4" /> Danni / Anomalie
+                    (Revisione)
+                  </label>
+                  <textarea
+                    className="w-full p-2 border border-red-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-red-500 outline-none"
+                    rows={2}
+                    value={formData.damages || ""}
+                    onChange={(e) =>
+                      setFormData({ ...formData, damages: e.target.value })
+                    }
+                    placeholder="Descrivi eventuali correzioni o anomalie..."
+                  ></textarea>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Note Generali (Revisione)
+                  </label>
+                  <textarea
+                    className="w-full p-3 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+                    rows={1}
+                    value={formData.notes || ""}
+                    onChange={(e) =>
+                      setFormData({ ...formData, notes: e.target.value })
+                    }
+                    placeholder="Note aggiuntive per la revisione..."
+                  ></textarea>
+                </div>
+
+                <PhotoUpload
+                  photos={photos}
+                  setPhotos={setPhotos}
+                  onShowToast={showToast}
+                />
+
+                {/* SEZIONE FIRMA STANDARD (Modale unica) */}
+                <div className="md:col-span-full">
+                  <SignaturePad
+                    onSave={handleSignatureSave}
+                    label="Firma di Revisione/Conferma"
+                    setFormData={setFormData}
+                    initialSignature={signature || selectedLog?.signature}
+                    disclaimer="Per salvare le modifiche è necessario fornire una NUOVA firma."
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-4 sticky bottom-0 bg-white border-t pt-4">
+                  <Button
+                    variant="secondary"
+                    onClick={closeModal}
+                    className="w-auto"
+                  >
+                    Annulla
+                  </Button>
+                  {/* Il pulsante di salvataggio è disabilitato se non c'è una nuova firma, ma non blocca se si sta solo visualizzando la vecchia */}
+                  <Button
+                    type="submit"
+                    className="w-auto"
+                    disabled={!signature && !selectedLog.signature}
+                  >
+                    Salva Revisione
+                  </Button>
+                </div>
+              </form>
+            </div>
+          </Card>
         </div>
-      );
+      </div>
+    );
+  };
+
+  const renderLogin = () => (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-4">
+      <Card className="max-w-sm w-full p-6 text-center">
+        {/* LOGO RENCO COMPLETO NEL LOGIN (Centrato) */}
+        <div className="mx-auto mb-6 w-fit">
+          <RencoLogo />
+        </div>
+        <h2 className="text-2xl font-bold mb-2 text-gray-900">Login</h2>
+        <p className="text-sm text-gray-500 mb-6">
+          Inserisci il PIN per accedere alle funzioni di gestione.
+        </p>
+        <form onSubmit={handleLogin} className="space-y-4">
+          <input
+            type="password"
+            placeholder="PIN"
+            value={pinInput}
+            onChange={(e) => setPinInput(e.target.value)}
+            className="w-full border p-3 rounded-lg text-center tracking-[0.5em] font-mono text-lg focus:ring-2 focus:ring-orange-500 outline-none"
+            maxLength={PIN_UNICO.length}
+            required
+          />
+          <Button variant="admin" type="submit" className="w-full">
+            <LogIn className="w-5 h-5" /> Accedi
+          </Button>
+        </form>
+      </Card>
+    </div>
+  );
+
+  const renderDashboard = () => {
+    const filteredVehicles = vehicles.filter(
+      (v) =>
+        v.model.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
+        v.plate.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
+        v.driver?.toLowerCase().includes(searchDashboardTerm.toLowerCase())
+    );
+
+    const available = vehicles.filter((v) => v.status === "disponibile");
+    const engaged = vehicles.filter((v) => v.status === "impegnato");
+    const totalVehicles = vehicles.length; // Calcolo Totale Veicoli
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700">
+          Dashboard Flotta
+        </h2>
+
+        {/* Rimosso il contatore Manutenzione -> Griglia a 3 colonne */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+          <Card className="p-4 flex items-center gap-4 bg-gray-100">
+            <div className="bg-slate-700 p-3 rounded-full text-white">
+              <Car className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Totale Veicoli</p>
+              <strong className="text-3xl font-bold">{totalVehicles}</strong>
+            </div>
+          </Card>
+          <Card className="p-4 flex items-center gap-4 bg-green-50">
+            <div className="bg-green-600 p-3 rounded-full text-white">
+              <CheckCircle className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Disponibili</p>
+              <strong className="text-3xl font-bold">{available.length}</strong>
+            </div>
+          </Card>
+          {/* ICONA ROSSA per In Uso (Punto 4) */}
+          <Card className="p-4 flex items-center gap-4 bg-red-50">
+            <div className="bg-red-600 p-3 rounded-full text-white">
+              <ArrowRight className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">In Uso</p>
+              <strong className="text-3xl font-bold">{engaged.length}</strong>
+            </div>
+          </Card>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Cerca veicolo, targa o driver..."
+              value={searchDashboardTerm}
+              onChange={(e) => setSearchDashboardTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-orange-500 focus:border-orange-500"
+            />
+          </div>
+        </div>
+
+        {loadingData ? (
+          <div className="text-center py-12 text-gray-500">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-4" />
+            Caricamento dati...
+          </div>
+        ) : filteredVehicles.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm border border-gray-100">
+            <AlertCircle className="w-10 h-10 mx-auto mb-3 text-gray-400" />
+            <p>Nessun veicolo trovato corrispondente alla ricerca.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {filteredVehicles.map((v) => (
+              <Card
+                key={v.id}
+                className="p-4 flex items-start gap-4 hover:shadow-md transition-shadow"
+              >
+                {/* Immagine veicolo o placeholder */}
+                <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0">
+                  {v.imageUrl ? (
+                    <img
+                      src={v.imageUrl}
+                      alt={v.model}
+                      className="w-full h-full object-cover border border-gray-200"
+                      onError={(e) => {
+                        // Fallback se l'immagine base64 è corrotta
+                        const target = e.target as HTMLImageElement;
+                        target.onerror = null;
+                        target.src = `https://placehold.co/64x64/f97316/ffffff?text=${v.plate}`;
+                        target.style.objectFit = "contain";
+                      }}
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold border border-gray-200">
+                      {v.plate || "NO IMG"}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-start mb-1">
+                    <h3 className="text-lg font-bold truncate text-gray-900">
+                      {v.model}
+                    </h3>
+                    <Badge status={v.status} />
+                  </div>
+                  <p className="text-sm text-gray-600 font-mono mb-2">
+                    {v.plate}
+                  </p>
+
+                  {/* Info Aggiuntive e Bottone */}
+                  <div className="mt-2 text-xs text-gray-500 space-y-1">
+                    <p>
+                      <strong>Km:</strong> {v.km} |<strong> Fuel:</strong>{" "}
+                      {v.fuel}
+                    </p>
+                    {v.status === "impegnato" && (
+                      <p className="text-orange-700">
+                        <User className="inline w-3 h-3 mr-1" />
+                        <strong>Driver:</strong> {v.driver || "N/A"} (Commessa:{" "}
+                        {v.commessa || "N/A"})
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="mt-4 flex gap-3">
+                    {/* Testo bottoni in Consegna/Rientro */}
+                    {v.status === "disponibile" ? (
+                      <Button
+                        variant="primary" // Ora in rosso
+                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                        onClick={() => openModal("checkout", v)}
+                      >
+                        <ArrowRight className="w-4 h-4" /> Consegna
+                      </Button>
+                    ) : v.status === "impegnato" ? (
+                      <Button
+                        variant="success"
+                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                        onClick={() => openModal("checkin", v)}
+                      >
+                        <CheckCircle className="w-4 h-4" /> Rientro
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="danger"
+                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                        disabled
+                      >
+                        <Zap className="w-4 h-4" /> In Manutenzione
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderFleet = () => {
+    const filteredVehicles = vehicles.filter(
+      (v) =>
+        v.model.toLowerCase().includes(searchFleetTerm.toLowerCase()) ||
+        v.plate.toLowerCase().includes(searchFleetTerm.toLowerCase())
+    );
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700">
+          Gestione Flotta
+        </h2>
+
+        <div className="flex flex-col sm:flex-row gap-3 items-stretch">
+          <Button
+            variant="admin"
+            onClick={() => openModal("add")}
+            className="sm:w-1/3"
+          >
+            <Plus className="w-5 h-5" /> Aggiungi Nuovo Veicolo
+          </Button>
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Filtra per Modello o Targa..."
+              value={searchFleetTerm}
+              onChange={(e) => setSearchFleetTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-orange-500 focus:border-orange-500"
+            />
+          </div>
+        </div>
+
+        <Card>
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Veicolo
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Targa
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden sm:table-cell">
+                    Km
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">
+                    Driver
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Stato
+                  </th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Azioni
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {filteredVehicles.map((v) => (
+                  <tr key={v.id}>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                      <div className="flex items-center gap-3">
+                        {v.imageUrl && (
+                          <img
+                            src={v.imageUrl}
+                            alt={v.model}
+                            className="w-8 h-8 object-cover rounded-full"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.onerror = null;
+                              target.src =
+                                "https://placehold.co/32x32/f97316/ffffff?text=C";
+                            }}
+                          />
+                        )}
+                        {!v.imageUrl && (
+                          <Car className="w-5 h-5 text-gray-400" />
+                        )}
+                        {v.model}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                      {v.plate}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden sm:table-cell">
+                      {v.km}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden md:table-cell">
+                      {v.driver || "N/A"}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                      <Badge status={v.status} />
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => openModal("edit", v)}
+                          className="text-blue-600 hover:text-blue-900 p-2 rounded-full hover:bg-blue-50 transition-colors"
+                          title="Modifica"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => deleteVehicle(v.id)}
+                          className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
+                          title="Elimina"
+                          disabled={v.status !== "disponibile"} // Disabilita se in uso
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {filteredVehicles.length === 0 && !loadingData && (
+            <div className="text-center p-6 text-gray-500">
+              Nessun veicolo registrato.
+            </div>
+          )}
+        </Card>
+        {loadingData && (
+          <div className="text-center py-4 text-gray-500">
+            <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderHistory = () => {
+    // 1. Filtra i log in base al termine di ricerca
+    const filteredLogs = logs.filter(
+      (log) =>
+        (log.model?.toLowerCase() || "").includes(searchTerm.toLowerCase()) || // FIX: Aggiunto controllo di null
+        (log.plate?.toLowerCase() || "").includes(searchTerm.toLowerCase()) || // FIX: Aggiunto controllo di null
+        (log.driver?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
+        (log.tripId || "").includes(searchTerm)
+    );
+
+    // 2. Raggruppa i log per Trip ID
+    const groupedLogs = filteredLogs.reduce(
+      (acc: { [key: string]: any[] }, log: any) => {
+        const tid = log.tripId || "LEGACY";
+        if (!acc[tid]) {
+          acc[tid] = [];
+        }
+        acc[tid].push(log);
+        return acc;
+      },
+      {}
+    );
+
+    // 3. Formatta per la visualizzazione (Array di Trip completi/in corso)
+    const displayTrips = Object.keys(groupedLogs)
+      .sort((a, b) => {
+        // Ordina per la data del log più recente (il primo nel gruppo)
+        const dateA = new Date(groupedLogs[a][0].date).getTime();
+        const dateB = new Date(groupedLogs[b][0].date).getTime();
+        return dateB - dateA; // Ordine: Gruppo più recente per primo
+      })
+      .map((tripId) => {
+        // FIX: Aggiunta tipizzazione esplicita a 'a', 'b', 'l' per risolvere errori TS7006.
+        const logsInTrip = groupedLogs[tripId].sort(
+          (a: any, b: any) =>
+            new Date(a.date).getTime() - new Date(b.date).getTime()
+        );
+
+        const consegna = logsInTrip.find((l: any) => l.type === "Consegna");
+        const rientro = logsInTrip.find((l: any) => l.type === "Rientro");
+
+        // Log per i dettagli base (prendiamo l'ultimo log come riferimento se non c'è rientro, altrimenti la consegna)
+        const refLog = rientro || consegna || logsInTrip[0];
+        const kmPercorsi =
+          rientro && consegna ? rientro.km - consegna.km : "N/A";
+
+        return {
+          tripId: tripId,
+          vehicleModel: refLog.vehicleModel,
+          plate: refLog.plate,
+          commessa: refLog.commessa || "N/A",
+          consegna: consegna,
+          rientro: rientro,
+          kmPercorsi: kmPercorsi,
+        };
+      });
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700">
+          Storico Movimenti
+        </h2>
+
+        <div className="flex flex-col sm:flex-row gap-3 items-stretch">
+          {/* PULSANTE EXCEL */}
+          <Button
+            variant="excel"
+            onClick={() =>
+              exportToExcelHack(
+                logs,
+                `Storico_Renco_Flotta_${new Date()
+                  .toISOString()
+                  .slice(0, 10)}.xls`
+              )
+            }
+            className="flex-shrink-0 sm:w-1/3"
+          >
+            <FileDown className="w-5 h-5" /> Excel
+          </Button>
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Cerca per Targa, Driver, Trip ID..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-orange-500 focus:border-orange-500"
+            />
+          </div>
+        </div>
+
+        {loadingData ? (
+          <div className="text-center py-12 text-gray-500">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-4" />
+            Caricamento dati...
+          </div>
+        ) : displayTrips.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm border border-gray-100">
+            <AlertCircle className="w-10 h-10 mx-auto mb-3 text-gray-400" />
+            <p>Nessun trip trovato corrispondente alla ricerca.</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Visualizzazione raggruppata per Trip ID (Consegna/Rientro) */}
+            {displayTrips.map((trip) => (
+              <Card
+                key={trip.tripId}
+                className="p-4 hover:shadow-lg transition-shadow"
+              >
+                <div className="flex justify-between items-start border-b pb-3 mb-3">
+                  <div>
+                    <h3 className="text-lg font-bold text-gray-900">
+                      Trip ID: #{trip.tripId}
+                    </h3>
+                    <p className="text-sm text-gray-500">
+                      {trip.vehicleModel} ({trip.plate})
+                    </p>
+                  </div>
+                  {trip.rientro && (
+                    <span className="text-sm font-semibold text-green-700 bg-green-100 px-3 py-1 rounded-full">
+                      Completato
+                    </span>
+                  )}
+                  {!trip.rientro && trip.consegna && (
+                    <span className="text-sm font-semibold text-orange-700 bg-orange-100 px-3 py-1 rounded-full">
+                      In Corso
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* RICONSEGNA (RIENTRO) - PRIMO */}
+                  {trip.rientro ? (
+                    <div className="p-3 border rounded-lg bg-green-50/50">
+                      <h4 className="flex items-center gap-2 text-base font-semibold text-green-700 mb-2">
+                        <CheckCircle className="w-4 h-4" /> Rientro
+                      </h4>
+                      <p className="text-sm text-gray-700">
+                        <strong>Driver:</strong> {trip.rientro.driver}
+                      </p>
+                      <p className="text-sm text-gray-700">
+                        <strong>Data:</strong> {formatDate(trip.rientro.date)}
+                      </p>
+                      <p className="text-sm text-gray-700">
+                        <strong>Km Finali:</strong> {trip.rientro.km} |
+                        <strong> Fuel:</strong> {trip.rientro.fuel}
+                      </p>
+                      <p className="text-sm text-orange-700 font-medium mt-1">
+                        Km percorsi: {trip.kmPercorsi}
+                      </p>
+                      {/* Indicazione Danni/Segnalazioni */}
+                      {trip.rientro.damages ? (
+                        <p
+                          className={`text-xs font-medium mt-2 flex items-center gap-1 text-red-600`}
+                        >
+                          <AlertTriangle className="w-3 h-3" />
+                          Danni Segnalati: {trip.rientro.damages}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3 text-green-600" />
+                          Nessun danno segnalato
+                        </p>
+                      )}
+                      <div className="mt-4 flex gap-3">
+                        <button
+                          onClick={() => generatePDF(trip.rientro)}
+                          disabled={generatingPdf}
+                          className="text-sm text-gray-500 hover:text-gray-900 flex items-center gap-1 transition-colors disabled:opacity-50 font-medium"
+                          title="Visualizza/Scarica PDF Verbale Rientro"
+                        >
+                          <Download className="w-4 h-4" /> Verbale
+                        </button>
+                        <button
+                          onClick={() => openLogModal(trip.rientro)}
+                          className="text-sm text-purple-600 hover:text-purple-900 flex items-center gap-1 transition-colors font-medium"
+                          title="Modifica Report Rientro"
+                        >
+                          <Pencil className="w-4 h-4" /> Modifica
+                        </button>
+                        {/* Pulsante Elimina Report */}
+                        <button
+                          onClick={() => deleteLog(trip.rientro.id)}
+                          className="text-sm text-red-600 hover:text-red-900 flex items-center gap-1 transition-colors font-medium ml-auto"
+                          title="Elimina Report Rientro"
+                        >
+                          <Trash2 className="w-4 h-4" /> Elimina
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-3 border-2 border-dashed rounded-lg border-gray-300 text-gray-500 flex flex-col items-center justify-center h-full min-h-[150px]">
+                      <Loader2 className="w-5 h-5 animate-spin mb-2" />
+                      <p className="text-sm font-medium">Trip In Corso</p>
+                      <p className="text-xs">In attesa di Rientro</p>
+                    </div>
+                  )}
+
+                  {/* RITIRO (CONSEGNA) - SECONDO */}
+                  {trip.consegna && (
+                    <div className="p-3 border rounded-lg bg-red-50/50">
+                      <h4 className="flex items-center gap-2 text-base font-semibold text-red-700 mb-2">
+                        <ArrowRight className="w-4 h-4" /> Consegna
+                      </h4>
+                      <p className="text-sm text-gray-700">
+                        <strong>Driver:</strong> {trip.consegna.driver}
+                      </p>
+                      <p className="text-sm text-gray-700">
+                        <strong>Data:</strong> {formatDate(trip.consegna.date)}
+                      </p>
+                      <p className="text-sm text-gray-700">
+                        <strong>Km Iniziali:</strong> {trip.consegna.km} |
+                        <strong> Fuel:</strong> {trip.consegna.fuel}
+                      </p>
+                      <div className="mt-2 text-xs text-gray-500">
+                        Commessa: {trip.consegna.commessa || "N/A"}
+                      </div>
+                      {/* Indicazione Danni/Segnalazioni */}
+                      {trip.consegna.damages ? (
+                        <p className="text-xs text-red-600 font-medium mt-2 flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3" />
+                          Danni Segnalati: {trip.consegna.damages}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3 text-green-600" />
+                          Nessun danno segnalato
+                        </p>
+                      )}
+                      <div className="mt-4 flex gap-3">
+                        <button
+                          onClick={() => generatePDF(trip.consegna)}
+                          disabled={generatingPdf}
+                          className="text-sm text-gray-500 hover:text-gray-900 flex items-center gap-1 transition-colors disabled:opacity-50 font-medium"
+                          title="Visualizza/Scarica PDF Verbale Consegna"
+                        >
+                          <Download className="w-4 h-4" /> Verbale
+                        </button>
+                        <button
+                          onClick={() => openLogModal(trip.consegna)}
+                          className="text-sm text-purple-600 hover:text-purple-900 flex items-center gap-1 transition-colors font-medium"
+                          title="Modifica Report Consegna"
+                        >
+                          <Pencil className="w-4 h-4" /> Modifica
+                        </button>
+                        {/* Pulsante Elimina Report */}
+                        <button
+                          onClick={() => deleteLog(trip.consegna.id)}
+                          className="text-sm text-red-600 hover:text-red-900 flex items-center gap-1 transition-colors font-medium ml-auto"
+                          title="Elimina Report Consegna"
+                        >
+                          <Trash2 className="w-4 h-4" /> Elimina
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+        {filteredLogs.length > 0 && loadingData && (
+          <div className="text-center py-4 text-gray-500">
+            <Loader2 className="w-6 h-6 animate-spin mx-auto" />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // --- INIZIALIZZAZIONE & FETCH DATI ---
+
+  // HOOK 1: Inizializzazione Auth
+  useEffect(() => {
+    loadExternalScripts(setXlsxLoaded);
+
+    const initAuth = async () => {
+      try {
+        if (auth && !auth.currentUser) {
+          // Tenta l'accesso anonimo se non c'è un utente corrente
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth Error (Anonimo):", error);
+        showToast("Errore Autenticazione Anonima.", "error");
+      }
+
+      // onAuthStateChanged è più affidabile per attendere la risposta iniziale di Firebase
+      const unsubscribeAuth = onAuthStateChanged(auth, (u) => {
+        setUser(u);
+        const sessionAuth = sessionStorage.getItem("renco_auth_role");
+        if (sessionAuth) {
+          setAuthRole(sessionAuth as "guest" | "admin");
+        }
+        // Imposta isAuthReady a true solo dopo il primo controllo dello stato
+        setIsAuthReady(true);
+      });
+
+      return () => unsubscribeAuth();
+    };
+    initAuth();
+  }, []);
+
+  // HOOK 2: Caricamento Dati (dipende da utente e ruolo)
+  useEffect(() => {
+    // Carica i dati solo se l'auth è pronto e il ruolo non è guest (o se si sta cercando di autenticarsi)
+    if (!isAuthReady || authRole === "guest") {
+      setLoadingData(false);
+      return;
     }
+
+    setLoadingData(true);
+    setPermissionError(false);
+
+    const qVehicles = query(getPublicCollectionPath("vehicles"));
+    const unsubVehicles = onSnapshot(
+      qVehicles,
+      (snapshot) => {
+        const vList = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setVehicles(
+          vList.sort((a: any, b: any) => a.model.localeCompare(b.model))
+        );
+        setLoadingData(false);
+        setPermissionError(false);
+      },
+      (err: any) => {
+        console.error("Error vehicles:", err);
+        if (err.code === "permission-denied") setPermissionError(true);
+        setLoadingData(false);
+      }
+    );
+
+    const qLogs = query(getPublicCollectionPath("logs"));
+    const unsubLogs = onSnapshot(
+      qLogs,
+      (snapshot) => {
+        const lList = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setLogs(
+          lList.sort(
+            (a: any, b: any) =>
+              new Date(b.date).getTime() - new Date(a.date).getTime()
+          )
+        );
+      },
+      (err) => console.error("Error logs:", err)
+    );
+
+    return () => {
+      unsubVehicles();
+      unsubLogs();
+    };
+  }, [isAuthReady, user, authRole]);
+
+  // --- RETURN PRINCIPALE ---
+
+  // 1. Mostra loader finché l'autenticazione non è pronta
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Loader2 className="w-8 h-8 animate-spin text-orange-600" />
+      </div>
+    );
+  }
+
+  // 2. Se non autenticato (guest role), mostra il login
+  if (authRole === "guest") {
     return renderLogin();
   }
 
-  // Tutti gli utenti autenticati sono "admin" e possono vedere tutto
+  // 3. Mostra l'app completa (admin role)
   const availableViews = ["dashboard", "flotta", "storico"];
 
   return (
@@ -2119,27 +2859,28 @@ const App = () => {
         type={toast.type}
         onClose={() => setToast({ ...toast, visible: false })}
       />
-      <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-30">
-        <div className="max-w-5xl mx-auto flex justify-between items-center">
+
+      {/* BARRA SUPERIORE FISSA - RIPRISTINO COLORE ARANCIO E FIX SCROLL */}
+      {/* Colore Header Renco: Arancio 600 */}
+      <header className="bg-orange-600 text-white p-4 shadow-lg fixed w-full top-0 left-0 right-0 z-30 h-16">
+        <div className="max-w-5xl mx-auto flex justify-between items-center h-full">
           <div className="flex items-center gap-3">
-            <div className="bg-orange-600 w-10 h-10 rounded flex items-center justify-center font-bold text-xl">
-              R
-            </div>
-            <h1 className="text-xl font-bold hidden sm:block">Renco Fleet Management</h1>
-            <span className="text-xs bg-orange-700 px-2 py-0.5 rounded-full font-medium ml-2 uppercase">
-              Admin
-            </span>
+            {/* Logo Renco nell'Header (Bianco su Arancio) - FIX 2: SKIPPED "FLEET POOL" e applicato SKREW */}
+            <RencoLogoHeader />
           </div>
           <button
             onClick={handleLogout}
-            className="text-sm text-gray-400 hover:text-white flex items-center gap-2 transition-colors"
+            className="text-sm text-white/80 hover:text-white flex items-center gap-2 transition-colors shrink-0"
           >
             <LogIn className="w-4 h-4 rotate-180" /> Esci
           </button>
         </div>
       </header>
-      <div className="max-w-5xl mx-auto px-4 mt-6">
-        <nav className="flex gap-2 mb-6 bg-white p-1 rounded-xl shadow w-fit">
+      {/* CORPO PRINCIPALE DELL'APP - AUMENTATO PADDING TOP PER FISSARE L'HEADER E COMPENSARE LA BARRA DI STATO MOBILE */}
+      <div className="max-w-5xl mx-auto px-4 pt-[5rem] sm:pt-6">
+        <nav className="flex gap-2 mb-6 bg-white p-1 rounded-xl shadow w-fit mt-4">
+          {" "}
+          {/* FIX 1: Aggiunto MT-4 per staccare dal bordo */}
           {availableViews.map((t) => (
             <button
               key={t}
@@ -2161,6 +2902,7 @@ const App = () => {
         </main>
       </div>
       {renderModal()}
+      {selectedLog && modalMode === "editLog" && renderLogModal()}
       <ConfirmationModal
         isOpen={confirmModal.isOpen}
         title={confirmModal.title}
