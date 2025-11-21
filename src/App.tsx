@@ -65,7 +65,7 @@ const __firebase_config = `{
 }`;
 
 // --- SICUREZZA ---
-const PIN_UNICO = "0000"; // PIN Unico per l'accesso (MODIFICATO: 0000)
+const PIN_UNICO = "RENCOMEZZI2025"; // PIN Unico per l'accesso (MODIFICATO: 0000)
 
 // INTERFACCIA TOAST
 interface ToastState {
