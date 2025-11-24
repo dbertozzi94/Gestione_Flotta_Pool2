@@ -418,6 +418,7 @@ const SignaturePad = ({
   disclaimer,
   initialSignature,
   setFormData,
+  modalMode, // Passiamo modalMode come prop per la logica di pulizia in editLog
 }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -509,14 +510,16 @@ const SignaturePad = ({
 
     // *** CORREZIONE CRITICA PER PERSISTENZA TRATTO ***
     if (!isDrawing) {
-      // Se c'è una firma originale (initialSignature) MA NON abbiamo ancora una currentSignatureBase64
-      // (cioè è il primo tocco sul pad vuoto o con solo la vecchia firma), allora pulisci.
-      if (initialSignature && !currentSignatureBase64) {
+      // Se stiamo modificando un log, e non c'è una firma interna, il primo tocco deve cancellare l'initialSignature
+      if (
+        modalMode === "editLog" &&
+        initialSignature &&
+        !currentSignatureBase64
+      ) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         setCurrentSignatureBase64(null);
         onSave(null); // Notifica l'esterno che la vecchia firma è stata eliminata.
       }
-      // Se currentSignatureBase64 esiste, NON fare nulla, semplicemente continua il tratto.
     }
 
     ctx.strokeStyle = "#000";
@@ -912,19 +915,41 @@ const App = () => {
     return date.toISOString().slice(0, 16);
   };
 
-  // Funzione per verificare il conflitto di prenotazione (Punto 2)
+  // --- FUNZIONI DI LOGICA BUSINESS ---
+
+  // Funzione per verificare se un veicolo ha prenotazioni future
+  const hasFutureBookings = (vehicleId: string | undefined) => {
+    if (!vehicleId) return false;
+    const now = new Date().getTime();
+    return bookings.some(
+      (b) => b.vehicleId === vehicleId && new Date(b.date).getTime() > now
+    );
+  };
+
+  // Funzione per determinare se il veicolo ha una prenotazione attiva o futura (per il badge)
+  const isVehicleBooked = (vehicleId: string) => {
+    // Cerca se il veicolo ha UNA QUALSIASI prenotazione che non è ancora scaduta.
+    return bookings.some((b) => {
+      if (b.vehicleId !== vehicleId) return false;
+      const returnTime = new Date(b.returnDate).getTime();
+      const now = new Date().getTime();
+      // La prenotazione è valida se non è ancora terminata (returnTime > now)
+      return returnTime > now;
+    });
+  };
+
+  // Funzione per verificare il conflitto di prenotazione
   const checkBookingConflict = (
     vehicleId: string,
     newStart: string,
     newEnd: string,
     existingBookings: any[],
-    currentBookingId: string | null = null,
+    currentBookingIdToExclude: string | null = null,
     currentVehicleStatus: string = "disponibile",
     currentReturnDateExpected: string | null = null
   ) => {
     const newStartMs = new Date(newStart).getTime();
     const newEndMs = new Date(newEnd).getTime();
-    const nowMs = new Date().getTime();
 
     // 0. Controlla se le date sono valide
     if (newStartMs >= newEndMs) {
@@ -934,7 +959,9 @@ const App = () => {
     // 1. Controlla conflitto con prenotazioni future esistenti
     const conflictingBooking = existingBookings.find((booking) => {
       if (booking.vehicleId !== vehicleId) return false;
-      if (currentBookingId && booking.id === currentBookingId) return false;
+      // Esclude la prenotazione che stiamo gestendo (modifica o checkout)
+      if (currentBookingIdToExclude && booking.id === currentBookingIdToExclude)
+        return false;
 
       const existingStartMs = new Date(booking.date).getTime();
       const existingEndMs = new Date(booking.returnDate).getTime();
@@ -960,7 +987,6 @@ const App = () => {
       ).getTime();
 
       // Se l'attuale rientro previsto è SUCCESSIVO all'inizio della NUOVA prenotazione, c'è conflitto.
-      // Cioè: il veicolo non sarà rientrato prima che la nuova prenotazione inizi.
       if (currentExpectedReturnMs > newStartMs) {
         return `Conflitto: il veicolo è in uso con rientro previsto il ${formatDate(
           currentReturnDateExpected
@@ -1281,7 +1307,7 @@ const App = () => {
     }
     setModalMode(mode);
     setSelectedLog(null);
-    // CORREZIONE: Inizializza checklist a true qui per il modulo di checkin/checkout
+    // CORREZIONE: Inizializza checklist come tutti true per il default spuntato.
     const initialChecklist: any = {};
     CHECKLIST_ITEMS.forEach((item) => (initialChecklist[item.id] = true));
     setChecklist(initialChecklist);
@@ -1737,35 +1763,64 @@ const App = () => {
         ? new Date(formData.returnDate).getTime()
         : null;
 
-      // Trova la prenotazione attiva che potrei stare per iniziare
-      const activeBooking = bookings.find(
+      // 1. Check se il mezzo ha prenotazioni future (per decidere se la data di rientro è obbligatoria)
+      const hasFutureBookingsNow = bookings.some(
         (b) =>
-          b.vehicleId === selectedVehicle.id &&
-          new Date(b.date).getTime() <= now && // La prenotazione dovrebbe essere iniziata o star per iniziare
-          new Date(b.returnDate).getTime() >= now
+          b.vehicleId === selectedVehicle.id && new Date(b.date).getTime() > now
       );
 
-      // Se la Consegna NON è partita da una prenotazione (book_checkout) ma una prenotazione è in corso O imminente
-      if (!selectedBooking && activeBooking) {
+      // Trova la prima prenotazione futura
+      const firstFutureBooking = bookings
+        .filter(
+          (b) =>
+            b.vehicleId === selectedVehicle.id &&
+            new Date(b.date).getTime() > now
+        )
+        .sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+        )[0];
+
+      // 2. LOGICA: Data di Rientro Previsto obbligatoria se ci sono prenotazioni future
+      if (hasFutureBookingsNow && !formData.returnDate) {
         showToast(
-          `Errore: Impossibile effettuare la consegna. Il veicolo è prenotato per oggi (${formatDate(
-            activeBooking.date
-          )}) da ${
-            activeBooking.driver
-          }. Se sei tu il driver, usa la funzione 'Consegna' nella pagina Prenotazioni.`,
+          `La riconsegna deve avere una Data di Rientro Prevista per evitare conflitti con la prenotazione di ${
+            firstFutureBooking.driver
+          } del ${formatDate(firstFutureBooking.date)}.`,
           "error"
         );
         return;
       }
 
-      // 2. Controllo se la riconsegna prevista va in conflitto con altre prenotazioni (solo se specificata)
+      // 3. LOGICA: Convalida Conflitti con la Riconsegna Prevista
       if (plannedReturn) {
+        // CORREZIONE CRITICA: Se stiamo facendo checkout da prenotazione, dobbiamo escluderla dal controllo di conflitto.
+        const excludeBookingId = selectedBooking?.id || null;
+
         const conflictMessage = checkBookingConflict(
           selectedVehicle.id,
           new Date().toISOString(), // Inizio Adesso
           formData.returnDate,
-          bookings
+          bookings,
+          excludeBookingId // Esclude la prenotazione corrente (se c'è)
         );
+
+        // Verifichiamo anche il conflitto con la prima prenotazione futura se la data di rientro è successiva al ritiro
+        if (
+          firstFutureBooking &&
+          plannedReturn &&
+          plannedReturn > new Date(firstFutureBooking.date).getTime()
+        ) {
+          showToast(
+            `Errore di Sovrapposizione: La riconsegna prevista per il ${formatDate(
+              formData.returnDate
+            )} è successiva all'inizio della prenotazione di ${
+              firstFutureBooking.driver
+            }.`,
+            "error"
+          );
+          return;
+        }
+
         if (conflictMessage) {
           showToast(
             `Errore di Sovrapposizione: La riconsegna prevista per il ${formatDate(
@@ -1846,19 +1901,23 @@ const App = () => {
         logData
       );
 
-      // LOGICA AGGIUNTIVA: CANCELLA PRENOTAZIONE AL RIENTRO (CHECKIN) SOLO SE INIZIATA DA PRENOTAZIONE
-      // PUNTO 4: La prenotazione deve restare valida se il rientro non è partito da essa.
-      if (modalMode === "checkin" && selectedVehicle.currentBookingId) {
+      // LOGICA AGGIUNTIVA: DISASSOCIA/CANCELLA PRENOTAZIONE AL RIENTRO (CHECKIN)
+      if (modalMode === "checkin") {
+        // Cerca se l'attuale mezzo in rientro è associato ad una prenotazione attiva
         const bookingIdToDelete = selectedVehicle.currentBookingId;
 
-        // NON cancelliamo la prenotazione, la disassociamo dal veicolo (la lasciamo nel DB per tracciamento)
-        // La cancellazione avviene solo manualmente in "Prenotazioni"
+        if (bookingIdToDelete) {
+          // 1. Rimuovi l'associazione al veicolo
+          await updateDoc(vehicleRef, { currentBookingId: null });
 
-        // Pulisci il riferimento al veicolo dopo il rientro (il mezzo non è più bloccato dalla prenotazione)
-        await updateDoc(vehicleRef, { currentBookingId: null });
-        console.log(
-          `Prenotazione ${bookingIdToDelete} disassociata al rientro.`
-        );
+          // 2. CANCELLA la prenotazione che è stata soddisfatta
+          await deleteDoc(getPublicDocRef("bookings", bookingIdToDelete));
+
+          console.log(
+            `Prenotazione ${bookingIdToDelete} cancellata al rientro.`
+          );
+          showToast(`Prenotazione completata e cancellata.`, "success");
+        }
       }
 
       // LOGICA AGGIUNTIVA: ASSOCIA PRENOTAZIONE ALLA CONSEGNA
@@ -1896,36 +1955,57 @@ const App = () => {
     logsData.forEach((log: any) => {
       const tid = log.tripId || "LEGACY";
       if (!trips[tid]) {
-        trips[tid] = {
-          tripId: log.tripId,
-          vehicleModel: log.vehicleModel,
-          plate: log.plate,
-          commessa: log.commessa || "N/A",
-        };
+        trips[tid] = [];
       }
-
-      // Consegna (checkout) / Rientro (checkin)
-      const isConsegna = log.type === "Consegna";
-      const suffix = isConsegna ? "CONSEGNA" : "RIENTRO";
-
-      // Aggiungi i dati del movimento
-      trips[tid][`Data ${suffix}`] = formatDate(log.date);
-      trips[tid][`Driver ${suffix}`] = log.driver || "N/A";
-      trips[tid][`Km ${suffix}`] = log.km;
-      trips[tid][`Fuel ${suffix}`] = log.fuel;
-      trips[tid][`Danni ${suffix}`] = log.damages || "";
-      trips[tid][`Note ${suffix}`] = log.notes || "";
-
-      // La checklist è sempre la più recente (dal Rientro) o l'ultima registrazione
-      CHECKLIST_ITEMS.forEach((item) => {
-        // Usiamo la checklist del log più recente nel trip per la colonna finale
-        if (!trips[tid][item.label] || !isConsegna) {
-          trips[tid][item.label] = log.checklist?.[item.id] ? "SI" : "NO";
-        }
-      });
+      trips[tid].push(log);
     });
 
-    const aggregatedTrips = Object.values(trips);
+    // Processamento per la riga singola (simile a renderHistory ma per l'export)
+    const aggregatedTrips = Object.keys(trips).map((tripId) => {
+      // Ordina per data (Consegna prima di Rientro)
+      const logsInTrip = trips[tripId].sort(
+        (a: any, b: any) =>
+          new Date(a.date).getTime() - new Date(b.date).getTime()
+      );
+
+      const consegna = logsInTrip.find((l: any) => l.type === "Consegna");
+      const rientro = logsInTrip.find((l: any) => l.type === "Rientro");
+      const refLog = rientro || consegna || logsInTrip[0];
+
+      const tripOutput: any = {
+        "Trip ID": `#${tripId || "N/A"}`,
+        "Modello Veicolo": refLog.vehicleModel,
+        Targa: refLog.plate,
+        Commessa: refLog.commessa || "N/A",
+
+        "Data CONSEGNA": consegna ? formatDate(consegna.date) : "",
+        "Driver CONSEGNA": consegna ? consegna.driver || "N/A" : "",
+        "Km CONSEGNA": consegna ? consegna.km : "",
+        "Fuel CONSEGNA": consegna ? consegna.fuel : "",
+        "Danni CONSEGNA": consegna ? consegna.damages || "" : "",
+        "Note CONSEGNA": consegna ? consegna.notes || "" : "",
+
+        "Data RIENTRO": rientro ? formatDate(rientro.date) : "",
+        "Driver RIENTRO": rientro ? rientro.driver || "N/A" : "",
+        "Km RIENTRO": rientro ? rientro.km : "",
+        "Fuel RIENTRO": rientro ? rientro.fuel : "",
+        "Danni RIENTRO": rientro ? rientro.damages || "" : "",
+        "Note RIENTRO": rientro ? rientro.notes || "" : "",
+
+        // La checklist è sempre l'ultima disponibile (rientro se c'è, altrimenti consegna)
+      };
+
+      const checklistSource = rientro || consegna;
+      CHECKLIST_ITEMS.forEach((item) => {
+        tripOutput[`Dotazione ${item.label}`] = checklistSource?.checklist?.[
+          item.id
+        ]
+          ? "SI"
+          : "NO";
+      });
+
+      return tripOutput;
+    });
 
     if (aggregatedTrips.length === 0) {
       showToast("Nessun dato aggregato da esportare.", "error");
@@ -1935,26 +2015,8 @@ const App = () => {
     // Separatore: Punto e Virgola (;) per compatibilità EU Excel
     const SEPARATOR = ";";
 
-    // Intestazioni per il formato Trip Unico
-    const headers = [
-      "Trip ID",
-      "Modello Veicolo",
-      "Targa",
-      "Commessa",
-      "Data CONSEGNA",
-      "Driver CONSEGNA",
-      "Km CONSEGNA",
-      "Fuel CONSEGNA",
-      "Danni CONSEGNA",
-      "Note CONSEGNA",
-      "Data RIENTRO",
-      "Driver RIENTRO",
-      "Km RIENTRO",
-      "Fuel RIENTRO",
-      "Danni RIENTRO",
-      "Note RIENTRO",
-      ...CHECKLIST_ITEMS.map((item) => `Dotazione ${item.label}`),
-    ];
+    // Intestazioni (uso le chiavi del primo oggetto, garantendo l'ordine)
+    const headers = Object.keys(aggregatedTrips[0]);
 
     const csvRows = aggregatedTrips.map((trip: any) => {
       // Funzione per pulire e avvolgere un campo di testo nelle virgolette (necessario per CSV/XLS)
@@ -1982,32 +2044,16 @@ const App = () => {
         return cleanAndQuote(str);
       };
 
-      const checklistValues = CHECKLIST_ITEMS.map(
-        (item) => trip[item.label] || "N/A"
-      );
-
-      return [
-        cleanAndQuote(`#${trip.tripId || "N/A"}`),
-        cleanAndQuote(trip.vehicleModel),
-        cleanAndQuote(trip.plate),
-        cleanAndQuote(trip.commessa),
-
-        cleanAndQuote(trip["Data CONSEGNA"] || ""),
-        cleanAndQuote(trip["Driver CONSEGNA"] || ""),
-        cleanExcelValue(trip["Km CONSEGNA"] || ""),
-        cleanExcelValue(trip["Fuel CONSEGNA"] || ""),
-        cleanAndQuote(trip["Danni CONSEGNA"] || ""),
-        cleanAndQuote(trip["Note CONSEGNA"] || ""),
-
-        cleanAndQuote(trip["Data RIENTRO"] || ""),
-        cleanAndQuote(trip["Driver RIENTRO"] || ""),
-        cleanExcelValue(trip["Km RIENTRO"] || ""),
-        cleanExcelValue(trip["Fuel RIENTRO"] || ""),
-        cleanAndQuote(trip["Danni RIENTRO"] || ""),
-        cleanAndQuote(trip["Note RIENTRO"] || ""),
-
-        ...checklistValues.map((val) => cleanAndQuote(val)),
-      ].join(SEPARATOR);
+      return headers
+        .map((header) => {
+          const value = trip[header];
+          // Applica cleanExcelValue solo ai campi numerici o che possono essere confusi con frazioni
+          if (header.includes("Km") || header.includes("Fuel")) {
+            return cleanExcelValue(value);
+          }
+          return cleanAndQuote(value);
+        })
+        .join(SEPARATOR);
     });
 
     // Inserisce il Byte Order Mark (BOM) per garantire la corretta interpretazione di UTF-8 in Excel
@@ -2135,7 +2181,7 @@ const App = () => {
           <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
             <div className="p-6">
               <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
-                <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
+                <h3 className="text-xl font-extrabold text-gray-700 flex items-center gap-3">
                   {isAdd && <Plus className="w-5 h-5 text-orange-600" />}
                   {isEdit && <Pencil className="w-5 h-5 text-blue-600" />}
                   {(isBook || isEditBook) && (
@@ -2436,7 +2482,12 @@ const App = () => {
                       <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-1">
                           <Clock className="w-4 h-4 text-gray-500" /> Rientro
-                          Previsto (Opzionale)
+                          Previsto{" "}
+                          {selectedBooking
+                            ? "(Da Prenotazione)"
+                            : hasFutureBookings(selectedVehicle?.id)
+                            ? "(Obbligatorio)"
+                            : "(Opzionale)"}
                         </label>
                         <input
                           type="datetime-local"
@@ -2507,6 +2558,7 @@ const App = () => {
                       label="Firma Driver per Accettazione"
                       setFormData={setFormData}
                       initialSignature={signature || selectedVehicle?.signature}
+                      modalMode={modalMode}
                       disclaimer={isConsegna ? DAMAGE_DISCLAIMER : null}
                     />
                   </div>
@@ -2552,7 +2604,7 @@ const App = () => {
           <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
             <div className="p-6">
               <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
-                <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
+                <h3 className="text-xl font-extrabold text-gray-700 flex items-center gap-3">
                   <Pencil className="w-5 h-5 text-purple-600" />
                   Modifica Log #{selectedLog.tripId} ({selectedLog.type})
                 </h3>
@@ -2653,6 +2705,7 @@ const App = () => {
                     label="Firma di Revisione/Conferma"
                     setFormData={setFormData}
                     initialSignature={signature || selectedLog?.signature}
+                    modalMode={modalMode}
                     disclaimer={DAMAGE_DISCLAIMER}
                   />
                 </div>
@@ -2836,7 +2889,7 @@ const App = () => {
                             )}
                             {isNonBookedOut && (
                               <span className="text-gray-500 text-xs py-2 px-3">
-                                Gestisci da Dashboard
+                                Solo Visualizzazione
                               </span>
                             )}
                           </div>
@@ -2883,31 +2936,49 @@ const App = () => {
   );
 
   const renderDashboard = () => {
-    // Funzione helper per determinare se il veicolo ha una prenotazione futura
-    const isVehicleBooked = (vehicleId: string) => {
-      const now = new Date().getTime();
-      // Cerca una prenotazione FUTURA
+    // Funzione helper per determinare se il veicolo ha una prenotazione attiva o futura (per il badge)
+    const isVehicleBookedNow = (vehicleId: string) => {
+      // Cerca se il veicolo ha UNA QUALSIASI prenotazione che non è ancora scaduta.
       return bookings.some((b) => {
         if (b.vehicleId !== vehicleId) return false;
-        const start = new Date(b.date).getTime();
-        // La prenotazione è FUTURE
-        return start > now;
+        const returnTime = new Date(b.returnDate).getTime();
+        const now = new Date().getTime();
+        // La prenotazione è valida se non è ancora terminata (returnTime > now)
+        return returnTime > now;
       });
+    };
+
+    // Funzione per avere la prima prenotazione futura
+    const getFirstFutureBooking = (vehicleId: string) => {
+      const now = new Date().getTime();
+      return bookings
+        .filter(
+          (b) => b.vehicleId === vehicleId && new Date(b.date).getTime() > now
+        )
+        .sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+        )[0];
     };
 
     // Filtro e ricerca
     const filteredVehicles = vehicles.filter(
       (v) =>
-        v.model.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.plate.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.driver?.toLowerCase().includes(searchDashboardTerm.toLowerCase())
+        (v.model?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        ) ||
+        (v.plate?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        ) ||
+        (v.driver?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        )
     );
 
     const available = vehicles.filter((v) => v.status === "disponibile");
     const engaged = vehicles.filter((v) => v.status === "impegnato");
     const totalVehicles = vehicles.length; // Calcolo Totale Veicoli
 
-    // Prenotazioni attive (solo quelle future)
+    // Prenotazioni attive (solo quelle con rientro futuro o attuale)
     const activeBookings = bookings.filter(
       (b) => new Date(b.returnDate || b.date).getTime() > new Date().getTime()
     );
@@ -2974,7 +3045,13 @@ const App = () => {
             <span className="flex items-center gap-2">
               <Calendar className="w-5 h-5" /> Prossime Prenotazioni
             </span>
-            {/* Pulsante Prenota (RIMOSSO) */}
+            {/* BOTTONE GESTISCI - RIPRISTINATO IL LINK ALLA PAGINA PRENOTAZIONI (V53) */}
+            <button
+              onClick={() => setView("bookings")}
+              className="text-xs text-purple-600 hover:text-purple-800 flex items-center gap-1 transition-colors font-medium"
+            >
+              Gestisci Prenotazioni <ArrowRight className="w-3 h-3" />
+            </button>
           </h3>
 
           {totalBookings === 0 ? (
@@ -3012,11 +3089,12 @@ const App = () => {
                     {isCheckedOutToThisBooking ? (
                       <BookingInUseBadge />
                     ) : (
+                      // PULSANTE CONSEGNA DIRETTA (al posto di Inizia in)
                       <button
-                        onClick={() => setView("bookings")}
-                        className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                        onClick={() => openModal("book_checkout", b)}
+                        className="text-xs text-red-600 hover:text-red-800 font-medium flex items-center gap-1"
                       >
-                        Gestisci
+                        <ArrowRight className="w-3 h-3" /> Consegna
                       </button>
                     )}
                   </div>
@@ -3051,7 +3129,7 @@ const App = () => {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {filteredVehicles.map((v) => {
-              const isFutureBooked = isVehicleBooked(v.id);
+              const isCurrentlyBooked = isVehicleBooked(v.id);
 
               // Data rientro prevista per i mezzi in uso
               const expectedReturn =
@@ -3097,8 +3175,8 @@ const App = () => {
                         {v.model}
                       </h3>
                       <div className="flex gap-1 items-center">
-                        {/* Label Prenotato (Punto 6) */}
-                        {isFutureBooked && <BookingBadge />}
+                        {/* Label Prenotato (Punto 1) */}
+                        {isCurrentlyBooked && <BookingBadge />}
                         <Badge status={v.status} />
                       </div>
                     </div>
@@ -3186,8 +3264,10 @@ const App = () => {
   const renderFleet = () => {
     const filteredVehicles = vehicles.filter(
       (v) =>
-        v.model.toLowerCase().includes(searchFleetTerm.toLowerCase()) ||
-        v.plate.toLowerCase().includes(searchFleetTerm.toLowerCase())
+        (v.model?.toLowerCase() || "").includes(
+          searchFleetTerm.toLowerCase()
+        ) ||
+        (v.plate?.toLowerCase() || "").includes(searchFleetTerm.toLowerCase())
     );
 
     return (
