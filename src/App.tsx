@@ -23,6 +23,10 @@ import {
   AlertCircle,
   Download,
   Maximize,
+  Calendar,
+  Clock,
+  BookOpen,
+  Wrench,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
 
@@ -40,6 +44,9 @@ import {
   query,
   runTransaction,
   setDoc,
+  orderBy,
+  where,
+  getDocs,
 } from "firebase/firestore";
 
 // Definizioni per TypeScript (Mantenute per coerenza)
@@ -65,7 +72,7 @@ const __firebase_config = `{
 }`;
 
 // --- SICUREZZA ---
-const PIN_UNICO = "RENCOMEZZI2025"; // PIN Unico per l'accesso (MODIFICATO: 0000)
+const PIN_UNICO = "RENCOMEZZI"; // PIN Unico per l'accesso (MODIFICATO: RENCOMEZZI)
 
 // INTERFACCIA TOAST
 interface ToastState {
@@ -141,6 +148,10 @@ const getNextTripId = async (dbInstance: any) => {
   }
 };
 
+// --- FUNZIONE SICURA PER ARRAY (FIX TypeError) ---
+// Estremamente importante per i dati legacy di Firestore che potrebbero non essere Array.
+const safeArray = (data: any) => (Array.isArray(data) ? data : []);
+
 // --- COMPONENTI UTILITY ---
 
 // Logo Renco Base (Arancio su Sfondo Chiaro - per login)
@@ -201,6 +212,10 @@ const Button = ({
     outline: "border border-gray-300 text-gray-700 hover:bg-gray-50",
     // Nuovo stile per Excel: verde scuro
     excel: "bg-green-700 text-white hover:bg-green-800 shadow-green-100",
+    // Stile per Prenotazione
+    booking: "bg-purple-600 text-white hover:bg-purple-700 shadow-purple-100",
+    // Nuovo stato Manutenzione/Riparazione
+    maintenance: "bg-blue-600 text-white hover:bg-blue-700 shadow-blue-100",
   };
 
   return (
@@ -216,19 +231,70 @@ const Button = ({
   );
 };
 
-const Badge = ({ status }: { status: string }) => {
+// Nuova Badge per la prenotazione condizionale
+const BookingBadge = () => (
+  <span
+    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border bg-purple-100 text-purple-700 border-purple-200`}
+  >
+    Prenotato
+  </span>
+);
+// Nuova Badge per la prenotazione in uso
+const BookingInUseBadge = () => (
+  <span
+    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border bg-orange-100 text-orange-700 border-orange-200`}
+  >
+    In Corso
+  </span>
+);
+
+const DamageBadge = () => (
+  <span
+    className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border bg-red-100 text-red-700 border-red-200`}
+  >
+    Danneggiato
+  </span>
+);
+
+const Badge = ({
+  status,
+  isUnderRepair,
+  isUnderMaintenance,
+}: {
+  status: string;
+  isUnderRepair: boolean;
+  isUnderMaintenance: boolean;
+}) => {
   const styles: any = {
     disponibile: "bg-green-100 text-green-700 border-green-200",
     impegnato: "bg-orange-100 text-orange-700 border-orange-200",
-    manutenzione: "bg-red-100 text-red-700 border-red-200",
+    riparazione: "bg-slate-500 text-white border-slate-600", // Manutenzione (Riparazione - Danni persistenti cancellati)
+    manutenzione: "bg-blue-500 text-white border-blue-600", // Nuova Manutenzione (Danni non cancellati)
   };
+
+  let displayStatus;
+
+  if (isUnderRepair) {
+    displayStatus = "riparazione"; // Vecchio stato (Danni cancellati)
+  } else if (isUnderMaintenance) {
+    displayStatus = "manutenzione"; // Nuovo stato (Danni non cancellati, solo per bloccare)
+  } else {
+    displayStatus = status.toLowerCase();
+  }
+
+  const displayText = isUnderRepair
+    ? "In Ripristino"
+    : isUnderMaintenance
+    ? "In Manutenzione"
+    : status;
+
   return (
     <span
       className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${
-        styles[status.toLowerCase()] || "bg-gray-100"
+        styles[displayStatus] || "bg-gray-100"
       }`}
     >
-      {status}
+      {displayText}
     </span>
   );
 };
@@ -393,6 +459,7 @@ const SignaturePad = ({
   disclaimer,
   initialSignature,
   setFormData,
+  modalMode, // Passiamo modalMode come prop per la logica di pulizia in editLog
 }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -484,14 +551,16 @@ const SignaturePad = ({
 
     // *** CORREZIONE CRITICA PER PERSISTENZA TRATTO ***
     if (!isDrawing) {
-      // Se c'è una firma originale (initialSignature) MA NON abbiamo ancora una currentSignatureBase64
-      // (cioè è il primo tocco sul pad vuoto o con solo la vecchia firma), allora pulisci.
-      if (initialSignature && !currentSignatureBase64) {
+      // Se stiamo modificando un log, e non c'è una firma interna, il primo tocco deve cancellare l'initialSignature
+      if (
+        modalMode === "editLog" &&
+        initialSignature &&
+        !currentSignatureBase64
+      ) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         setCurrentSignatureBase64(null);
         onSave(null); // Notifica l'esterno che la vecchia firma è stata eliminata.
       }
-      // Se currentSignatureBase64 esiste, NON fare nulla, semplicemente continua il tratto.
     }
 
     ctx.strokeStyle = "#000";
@@ -598,9 +667,11 @@ const SignaturePad = ({
   );
 };
 
-const PhotoUpload = ({ photos, setPhotos, onShowToast }: any) => {
+// NUOVO COMPONENTE: Upload Foto Danni/Segnalazioni
+const DamagePhotoUpload = ({ photos, setPhotos, onShowToast, label }: any) => {
   const [compressing, setCompressing] = useState(false);
 
+  // Riutilizzo la logica di compressione del codice
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -661,7 +732,7 @@ const PhotoUpload = ({ photos, setPhotos, onShowToast }: any) => {
   return (
     <div>
       <label className="block text-sm font-medium text-gray-700 mb-2">
-        Foto (Danni o Segnalazioni)
+        {label}
       </label>
       <div className="flex flex-wrap gap-2 mb-2">
         {photos.map((photo: string, idx: number) => (
@@ -787,6 +858,13 @@ const CHECKLIST_ITEMS = [
 
 const FUEL_LEVELS = ["Riserva", "1/4", "1/2", "3/4", "Pieno"];
 
+// Messaggio Disclaimer Aggiornato (Punto 1)
+const DAMAGE_DISCLAIMER =
+  "In caso di danneggiamento, qualora il danno ammonti ad un valore superiore a 500€, la società si riserva il diritto di addebitare al dipendente il 20% dell'importo della riparazione";
+
+// Data fittizia molto lontana per il calcolo dei conflitti (Anno 2099)
+const FAR_FUTURE_DATE = new Date("2099-01-01T00:00:00.000Z").toISOString();
+
 // Funzione di utilità per il check se il dispositivo è mobile
 const isMobileDevice = () => {
   if (typeof window === "undefined" || typeof navigator === "undefined")
@@ -803,26 +881,37 @@ const App = () => {
   const [authRole, setAuthRole] = useState<"guest" | "admin">("guest");
   const [pinInput, setPinInput] = useState("");
   const [isAuthReady, setIsAuthReady] = useState(false);
+  // AGGIUNTO 'bookings' e 'danni' alla navigazione
   const [view, setView] = useState("dashboard");
   const [user, setUser] = useState<any>(null);
   const [vehicles, setVehicles] = useState<any[]>([]);
   const [logs, setLogs] = useState<any[]>([]);
+  // Nuovo stato per le prenotazioni
+  const [bookings, setBookings] = useState<any[]>([]);
   const [loadingData, setLoadingData] = useState(true);
   const [permissionError, setPermissionError] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchFleetTerm, setSearchFleetTerm] = useState("");
   const [searchDashboardTerm, setSearchDashboardTerm] = useState("");
+  // Aggiunto stato per la prenotazione da modificare
   const [selectedVehicle, setSelectedVehicle] = useState<any>(null);
   const [selectedLog, setSelectedLog] = useState<any>(null);
+  const [selectedBooking, setSelectedBooking] = useState<any>(null);
+  // Aggiunto 'book' e 'editBook' a modalMode
   const [modalMode, setModalMode] = useState<string | null>(null);
   const [formData, setFormData] = useState<any>({});
-  const [checklist, setChecklist] = useState<any>({});
-  const [photos, setPhotos] = useState<any[]>([]);
-  // signature viene aggiornata solo dal salvataggio della modale fullscreen o dal pad piccolo
+  // Corretto: Inizializza checklist come tutti true per il default spuntato.
+  const [checklist, setChecklist] = useState<any>(() => {
+    const initialChecklist: any = {};
+    CHECKLIST_ITEMS.forEach((item) => (initialChecklist[item.id] = true));
+    return initialChecklist;
+  });
+  // Nuovi stati per le foto separate
+  const [damagePhotos, setDamagePhotos] = useState<any[]>([]); // Foto Danni (Persistenti)
+  const [signalingPhotos, setSignalingPhotos] = useState<any[]>([]); // Foto Segnalazioni (Solo Log)
+
   const [signature, setSignature] = useState<string | null>(null);
   const [xlsxLoaded, setXlsxLoaded] = useState(true);
-
-  // Rimosso lo stato isSignatureModalOpen
 
   const [toast, setToast] = useState<ToastState>({
     visible: false,
@@ -867,10 +956,118 @@ const App = () => {
     return `${day}-${month}-${year}`;
   };
 
+  // Funzione per formattare data e ora per i picker HTML
+  const formatDateTimeLocal = (isoString?: string) => {
+    const date = isoString ? new Date(isoString) : new Date();
+    date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+    return date.toISOString().slice(0, 16);
+  };
+
+  // --- FUNZIONI DI LOGICA BUSINESS ---
+
+  // Funzione per verificare se un veicolo ha danni
+  const hasPersistentDamages = (vehicle: any) => {
+    // FIX V87: Usiamo safeArray per garantire che v.persistentDamages sia un array
+    return (safeArray(vehicle.persistentDamages).length || 0) > 0;
+  };
+
+  // Funzione per verificare se un veicolo ha prenotazioni future
+  const hasFutureBookings = (vehicleId: string | undefined) => {
+    if (!vehicleId) return false;
+    const now = new Date().getTime();
+    // Il controllo esclude le prenotazioni che sono già scadute
+    return bookings.some(
+      (b) =>
+        b.vehicleId === vehicleId &&
+        new Date(b.returnDate || b.date).getTime() > now
+    );
+  };
+
+  // Funzione per determinare se il veicolo ha una prenotazione attiva o futura (per il badge)
+  const isVehicleBooked = (
+    vehicleId: string,
+    currentBookingId: string | null
+  ) => {
+    const now = new Date().getTime();
+
+    // Filtra solo le prenotazioni FUTURE (dopo 'adesso') E non quella che sta per essere iniziata (currentBookingId)
+    const futureCommitments = bookings.filter(
+      (b) =>
+        b.vehicleId === vehicleId &&
+        b.id !== currentBookingId && // Escludi la prenotazione attualmente associata al mezzo
+        new Date(b.returnDate || b.date).getTime() > now
+    );
+
+    return futureCommitments.length > 0;
+  };
+
+  // Funzione per verificare il conflitto di prenotazione
+  const checkBookingConflict = (
+    vehicleId: string,
+    newStart: string,
+    newEnd: string,
+    existingBookings: any[],
+    currentBookingIdToExclude: string | null = null,
+    currentVehicleStatus: string = "disponibile",
+    currentReturnDateExpected: string | null = null
+  ) => {
+    const newStartMs = new Date(newStart).getTime();
+    const newEndMs = new Date(newEnd).getTime();
+
+    // 0. Controlla se le date sono valide
+    if (newStartMs >= newEndMs) {
+      return "La data di rientro presunta deve essere successiva alla data di ritiro.";
+    }
+
+    // 1. Controlla conflitto con prenotazioni future esistenti
+    const conflictingBooking = existingBookings.find((booking) => {
+      if (booking.vehicleId !== vehicleId) return false;
+      // Esclude la prenotazione che stiamo gestendo (modifica o checkout)
+      if (currentBookingIdToExclude && booking.id === currentBookingIdToExclude)
+        return false;
+
+      const existingStartMs = new Date(booking.date).getTime();
+      const existingEndMs = new Date(booking.returnDate).getTime();
+
+      // Check di sovrapposizione: (InizioA < FineB) && (FineA > InizioB)
+      const overlap = newStartMs < existingEndMs && newEndMs > existingStartMs;
+
+      return overlap;
+    });
+
+    if (conflictingBooking) {
+      return `Conflitto: il veicolo è già prenotato da ${
+        conflictingBooking.driver
+      } dal ${formatDate(conflictingBooking.date)} al ${formatDate(
+        conflictingBooking.returnDate
+      )}.`;
+    }
+
+    // 2. Controlla conflitto con l'occupazione attuale del veicolo (se è fuori)
+    if (currentVehicleStatus === "impegnato" && currentReturnDateExpected) {
+      // Utilizza la data nel 2099 se non specificata (per il calcolo dei conflitti)
+      const expectedReturnIso = currentReturnDateExpected || FAR_FUTURE_DATE;
+      const currentExpectedReturnMs = new Date(expectedReturnIso).getTime();
+
+      // Se l'attuale rientro previsto è SUCCESSIVO all'inizio della NUOVA prenotazione, c'è conflitto.
+      if (currentExpectedReturnMs > newStartMs) {
+        // Se la data è quella fittizia (2099), restituisci un messaggio generico di indisponibilità
+        if (expectedReturnIso === FAR_FUTURE_DATE) {
+          return `Conflitto: il veicolo è in uso e NON ha una data di rientro prevista. Impossibile prenotare.`;
+        }
+        return `Conflitto: il veicolo è in uso con rientro previsto il ${formatDate(
+          currentReturnDateExpected
+        )}. Questa data è successiva all'inizio della tua prenotazione.`;
+      }
+    }
+
+    return null; // Nessun conflitto
+  };
+
   // --- FUNZIONI DI GENERAZIONE PDF ---
 
   // Funzione helper che crea il PDF come oggetto jspdf e lo restituisce (Generazione al volo)
-  const generatePDFDocument = (logData: any) => {
+  const generatePDFDocument = (logData: any, deliveryLog: any) => {
     if (!window.jspdf) {
       console.error("Libreria PDF non caricata.");
       return null;
@@ -959,6 +1156,14 @@ const App = () => {
       doc.text(`${logData.driver || "N/A"}`, 100, yPos + 17);
       // Commessa
       doc.text(`Commessa: ${logData.commessa || "N/A"}`, 100, yPos + 23);
+      // Rientro Previsto
+      if (logData.returnDateExpected) {
+        doc.text(
+          `Rientro Previsto: ${formatDate(logData.returnDateExpected)}`,
+          100,
+          yPos + 29
+        );
+      }
 
       // Colonna 3: Stato
       doc.setFont("helvetica", "bold");
@@ -969,7 +1174,9 @@ const App = () => {
 
       yPos += 50;
 
-      // Sezione Dotazioni (Checklist)
+      // --- 1. SEZIONE DOTAZIONI (Checklist) ---
+
+      const items = CHECKLIST_ITEMS;
       if (logData.checklist && Object.keys(logData.checklist).length > 0) {
         doc.setFont("helvetica", "bold");
         doc.setFontSize(12);
@@ -977,12 +1184,28 @@ const App = () => {
         yPos += 8;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(10);
-        const items = CHECKLIST_ITEMS;
+
+        // Trova log di Consegna (per confronto)
+        const deliveryChecklist = deliveryLog?.checklist || {};
+
         items.forEach((item, index) => {
           const isPresent = logData.checklist[item.id];
+          const wasPresentOnDelivery = deliveryChecklist[item.id];
 
-          const checkText = isPresent ? "[SI]" : "[NO]";
-          const textColor = isPresent ? [0, 150, 0] : [200, 0, 0]; // RGB
+          let checkText = isPresent ? "[SI]" : "[NO]";
+          let textColor: [number, number, number] = isPresent
+            ? [0, 150, 0]
+            : [200, 0, 0]; // RGB
+
+          // Punto 5: Evidenziare se mancante al Rientro ma presente alla Consegna
+          if (
+            logData.type === "Rientro" &&
+            !isPresent &&
+            wasPresentOnDelivery
+          ) {
+            checkText += " (MANCANTE)";
+            textColor = [255, 0, 0]; // Rosso vivo
+          }
 
           doc.setTextColor(...textColor);
 
@@ -990,45 +1213,105 @@ const App = () => {
           if (index % 2 === 1) yPos += 6;
         });
         if (items.length % 2 === 1) yPos += 6; // Se dispari, aggiungi spazio
-        yPos += 4;
+        yPos += 8;
       }
 
-      // Sezione Note e Segnalazioni
-      doc.setTextColor(0, 0, 0); // Reset colore testo
-      if (logData.notes || logData.damages) {
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(12);
-        doc.text("NOTE E SEGNALAZIONI", 14, yPos);
+      // --- 2. SEZIONE DANNI E SEGNALAZIONI (Testo) ---
+
+      const persistentDamages = safeArray(logData.persistentDamages);
+      const newDamagesEntry = logData.damages; // Stringa di testo (nuovi danni)
+
+      const hasPersistentDamagesList = persistentDamages.length > 0;
+      const hasNewDamagesText = !!newDamagesEntry;
+
+      doc.setTextColor(0, 0, 0);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(12);
+
+      if (hasPersistentDamagesList || hasNewDamagesText || logData.notes) {
+        doc.text("DANNI E SEGNALAZIONI", 14, yPos);
         yPos += 8;
         doc.setFont("helvetica", "normal");
         doc.setFontSize(10);
 
-        if (logData.damages) {
-          doc.setTextColor(200, 0, 0);
-          doc.text(`DANNI: ${logData.damages}`, 14, yPos);
-          yPos += 6;
+        let listYPos = yPos;
+        let lineSpacing = 6;
+
+        // 2.1 Danni Preesistenti (solo se esistono)
+        if (hasPersistentDamagesList) {
+          doc.setTextColor(150, 0, 0); // Rosso più scuro per i danni
+          doc.setFont("helvetica", "bold");
+          doc.text("Danni Preesistenti:", 14, listYPos);
+          listYPos += lineSpacing;
+
+          persistentDamages.forEach((d: any) => {
+            doc.setFont("helvetica", "normal");
+            doc.text(`- Trip #${d.tripId}: ${d.description}`, 14, listYPos);
+            listYPos += lineSpacing;
+          });
+          listYPos += lineSpacing / 2;
+        } else {
+          doc.setTextColor(100, 100, 100);
+          doc.text("Danni Preesistenti: N/A", 14, listYPos);
+          listYPos += lineSpacing;
         }
-        if (logData.notes) {
-          doc.setTextColor(0, 0, 0);
-          doc.text(`Note: ${logData.notes}`, 14, yPos);
-          yPos += 6;
+
+        // 2.2 Nuovi Danni Registrati (solo se presenti nel form attuale)
+        if (hasNewDamagesText) {
+          doc.setTextColor(255, 0, 0); // Rosso vivo per i nuovi danni
+          doc.setFont("helvetica", "bold");
+          doc.text(`Nuovi Danni/Anomalie Registrate:`, 14, listYPos);
+          listYPos += lineSpacing;
+
+          doc.setFont("helvetica", "normal");
+          doc.text(newDamagesEntry, 14, listYPos);
+          listYPos += lineSpacing;
+          listYPos += lineSpacing / 2;
+        } else {
+          // Punto 1: Colorazione dinamica N/A (Rossastro chiaro)
+          doc.setTextColor(230, 120, 120); // Rosso più vivido
+          doc.setFont("helvetica", "bold"); // Rendi il testo N/A in grassetto per coerenza con gli altri titoli
+          doc.text("Nuovi Danni/Anomalie: N/A", 14, listYPos);
+          listYPos += lineSpacing;
         }
-        yPos += 4;
+
+        // 2.3 Segnalazioni Generiche (Testo)
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        // FIX P.3: Calcola la posizione del testo N/A per le Segnalazioni Generiche
+        const labelNotes = "Segnalazioni Generiche: ";
+        const textNotes = logData.notes || "N/A";
+
+        doc.text(labelNotes, 14, listYPos);
+        doc.setFont("helvetica", "normal");
+        doc.text(textNotes, 14 + doc.getTextWidth(labelNotes), listYPos, {
+          maxWidth: pageWidth - 14 - doc.getTextWidth(labelNotes),
+        }); // Mantiene il testo sulla stessa linea
+
+        listYPos += lineSpacing;
+
+        yPos = listYPos + 4;
       }
 
-      // Sezione Foto Allegati
-      if (logData.photos && logData.photos.length > 0) {
-        doc.setTextColor(0, 0, 0); // Reset colore testo
+      // --- 3. FOTO: Danni Preesistenti (Da Veicolo) ---
+      const existingDamagePhotos = safeArray(logData.existingDamagePhotos);
+      if (existingDamagePhotos.length > 0) {
+        if (yPos > 240) {
+          doc.addPage();
+          yPos = 20;
+        }
+
+        doc.setTextColor(0, 0, 0);
         doc.setFont("helvetica", "bold");
         doc.setFontSize(12);
-        doc.text("FOTO ALLEGATE", 14, yPos);
+        doc.text("FOTO DANNI PREESISTENTI", 14, yPos);
         yPos += 8;
 
         let xOffset = 14;
         const photoWidth = 50;
         const photoHeight = 50;
 
-        logData.photos.forEach((photo: string, i: number) => {
+        existingDamagePhotos.forEach((photo: string) => {
           if (xOffset + photoWidth > pageWidth - 14) {
             xOffset = 14;
             yPos += photoHeight + 5;
@@ -1037,23 +1320,94 @@ const App = () => {
             doc.addPage();
             yPos = 20;
             xOffset = 14;
-            doc.setFontSize(10);
-            doc.text(
-              `FOTO ALLEGATE (Continua) - Pagina ${
-                doc.internal.pages.length - 1
-              }`,
-              14,
-              yPos
-            );
-            yPos += 8;
           }
 
           try {
-            // Aggiungi immagine base64 al PDF
             doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
             xOffset += photoWidth + 5;
           } catch (e) {
-            console.warn("Errore aggiunta immagine al PDF", e);
+            console.warn(
+              "Errore aggiunta immagine danno preesistente al PDF",
+              e
+            );
+          }
+        });
+        yPos += photoHeight + 10;
+      }
+
+      // --- 4. FOTO NUOVI DANNI (DA QUESTO VERBALE) ---
+      const newDamagePhotos = safeArray(logData.newDamagePhotos);
+      if (newDamagePhotos.length > 0) {
+        if (yPos > 240) {
+          doc.addPage();
+          yPos = 20;
+        }
+
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(12);
+        doc.text("FOTO NUOVI DANNI", 14, yPos);
+        yPos += 8;
+
+        let xOffset = 14;
+        const photoWidth = 50;
+        const photoHeight = 50;
+
+        newDamagePhotos.forEach((photo: string) => {
+          if (xOffset + photoWidth > pageWidth - 14) {
+            xOffset = 14;
+            yPos += photoHeight + 5;
+          }
+          if (yPos + photoHeight > 270) {
+            doc.addPage();
+            yPos = 20;
+            xOffset = 14;
+          }
+
+          try {
+            doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
+            xOffset += photoWidth + 5;
+          } catch (e) {
+            console.warn("Errore aggiunta immagine nuovo danno al PDF", e);
+          }
+        });
+        yPos += photoHeight + 10;
+      }
+
+      // --- 5. SEZIONE FOTO SEGNALAZIONI ---
+      const signalingPhotos = safeArray(logData.signalingPhotos);
+      if (signalingPhotos.length > 0) {
+        if (yPos > 240) {
+          doc.addPage();
+          yPos = 20;
+        }
+
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(12);
+        doc.text("FOTO SEGNALAZIONI", 14, yPos);
+        yPos += 8;
+
+        let xOffset = 14;
+        const photoWidth = 50;
+        const photoHeight = 50;
+
+        signalingPhotos.forEach((photo: string) => {
+          if (xOffset + photoWidth > pageWidth - 14) {
+            xOffset = 14;
+            yPos += photoHeight + 5;
+          }
+          if (yPos + photoHeight > 270) {
+            doc.addPage();
+            yPos = 20;
+            xOffset = 14;
+          }
+
+          try {
+            doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
+            xOffset += photoWidth + 5;
+          } catch (e) {
+            console.warn("Errore aggiunta immagine segnalazione al PDF", e);
           }
         });
         yPos += photoHeight + 10;
@@ -1088,16 +1442,13 @@ const App = () => {
         doc.setFontSize(8);
         doc.setFont("helvetica", "italic");
         doc.setTextColor(100, 100, 100);
-        doc.text(
-          "In caso di danneggiamento, qualora il danno ammonti ad un valore superiore ai 500€, la società",
-          14,
-          yPos
+
+        // NUOVO MESSAGGIO DISCLAIMER (Punto 1)
+        const disclaimerLines = DAMAGE_DISCLAIMER.split(
+          "la società si riserva"
         );
-        doc.text(
-          "si riserva il diritto di addebitare al dipendente il 20% dell'importo della riparazione.",
-          14,
-          yPos + 4
-        );
+        doc.text(disclaimerLines[0], 14, yPos);
+        doc.text(`la società si riserva${disclaimerLines[1]}`, 14, yPos + 4);
       }
 
       // Restituisce l'oggetto doc di jspdf
@@ -1112,7 +1463,42 @@ const App = () => {
   const generatePDF = (logData: any) => {
     setGeneratingPdf(true);
 
-    const pdfDoc = generatePDFDocument(logData);
+    // FIX: Assicuriamo che i campi danno e foto persistenti siano presenti nel logData,
+    // anche se sono nulli nel log storico, li recuperiamo dal record veicolo se necessario.
+    const vehicle = vehicles.find((v) => v.id === logData.vehicleId);
+
+    // Preparo i dati per il PDF in un formato più pulito, includendo foto persistenti e log correnti
+    const augmentedLogData = {
+      ...logData,
+      // Danni registrati nel log (nuovi danni)
+      damages: logData.damages || "",
+
+      // Danni Preesistenti (Lista di oggetti danno dal log o dal veicolo)
+      persistentDamages: safeArray(
+        logData.persistentDamages || vehicle?.persistentDamages
+      ),
+
+      // Foto Danni Preesistenti: Foto che sono sul veicolo (quelle persistenti)
+      existingDamagePhotos: safeArray(vehicle?.damagePhotos),
+
+      // Foto Nuovi Danni (caricati in questo log)
+      newDamagePhotos: safeArray(
+        logData.newDamagePhotos || logData.damagePhotos
+      ),
+      // Foto Segnalazioni (caricati in questo log)
+      signalingPhotos: safeArray(logData.photos || logData.signalingPhotos),
+    };
+
+    // Al momento del rientro, i "danni preesistenti" nel verbale sono quelli che erano sul log di consegna.
+    // Qui usiamo la lista di danni del veicolo come riferimento.
+
+    // Trova il log di Consegna per il confronto della checklist
+    const deliveryLog =
+      logData.type === "Rientro"
+        ? logs.find((l) => l.tripId === logData.tripId && l.type === "Consegna")
+        : null;
+
+    const pdfDoc = generatePDFDocument(augmentedLogData, deliveryLog);
 
     if (!pdfDoc) {
       setGeneratingPdf(false);
@@ -1161,40 +1547,131 @@ const App = () => {
   };
 
   // --- FUNZIONI DI GESTIONE MODALI ---
-  const openModal = (mode: string, vehicle: any = null) => {
-    // Solo Admin può aggiungere/modificare
-    if ((mode === "add" || mode === "edit") && authRole !== "admin") {
+  const openModal = (mode: string, data: any = null) => {
+    // Solo Admin può aggiungere/modificare/prenotare/gestire danni
+    if (
+      (mode === "add" ||
+        mode === "edit" ||
+        mode === "book" ||
+        mode === "editBook" ||
+        mode === "book_checkout" ||
+        mode === "danni") &&
+      authRole !== "admin"
+    ) {
       showToast(
-        "Accesso negato: solo gli amministratori possono modificare la flotta.",
+        "Accesso negato: solo gli amministratori possono gestire la flotta.",
         "error"
       );
       return;
     }
     setModalMode(mode);
-    setSelectedVehicle(vehicle);
-    setSelectedLog(null); // Resetta log selezionato
-    const initCheck: any = {};
-    CHECKLIST_ITEMS.forEach((i) => (initCheck[i.id] = true));
-    setChecklist(initCheck);
-    setPhotos([]);
+    setSelectedLog(null);
+    // Corretto: Inizializza checklist come tutti true PER DEFAULT.
+    const initialChecklist: any = {};
+    CHECKLIST_ITEMS.forEach((item) => (initialChecklist[item.id] = true));
+
+    // Inizializza foto separate
+    setDamagePhotos([]);
+    setSignalingPhotos([]);
     setSignature(null);
 
-    // Pre-fill per Edit o Transaction
-    if (vehicle) {
+    // Variabili per l'inizializzazione
+    const now = formatDateTimeLocal();
+    const future = new Date(new Date().getTime() + 3600000 * 24); // 24 ore dopo
+    const futureTime = formatDateTimeLocal(future.toISOString());
+
+    // Gestione Checkout da Prenotazione (data è la prenotazione, serve trovare il veicolo)
+    if (mode === "book_checkout") {
+      const vehicle = vehicles.find((v) => v.id === data.vehicleId);
+      setSelectedVehicle(vehicle);
+      setSelectedBooking(data);
       setFormData({
-        model: vehicle.model,
-        plate: vehicle.plate,
-        km: vehicle.km,
-        fuel: vehicle.fuel || "Pieno",
-        driver: vehicle.driver || "",
-        commessa: vehicle.commessa || "",
-        imageUrl: vehicle.imageUrl || "", // Carica l'immagine Base64 esistente
-        currentSignature: null, // Firma corrente
+        model: vehicle?.model,
+        plate: vehicle?.plate,
+        km: vehicle?.km,
+        fuel: vehicle?.fuel || "Pieno",
+        // Pre-fill con i dati di prenotazione
+        driver: data.driver || "",
+        commessa: data.commessa || "",
+        imageUrl: vehicle?.imageUrl || "",
+        // Data rientro prevista presa dalla prenotazione
+        returnDate: formatDateTimeLocal(data.returnDate),
+        // Danni persistenti
+        persistentDamages: safeArray(vehicle?.persistentDamages),
+        damages: "",
       });
+
+      // FIX P.1: NON CARICARE FOTO DANNI PREESISTENTI NEL CAMPO INPUT
+      setDamagePhotos([]);
+
+      setModalMode("checkout"); // Forzo la modale di checkout (Consegna)
+      return;
+    }
+
+    // Gestione Modifica Prenotazione
+    if (mode === "editBook") {
+      setSelectedBooking(data); // data è la prenotazione
+      setSelectedVehicle(vehicles.find((v) => v.id === data.vehicleId));
+      setFormData({
+        reservationDriver: data.driver || "",
+        reservationCommessa: data.commessa || "",
+        reservationDateStart: formatDateTimeLocal(data.date),
+        reservationDateEnd: formatDateTimeLocal(data.returnDate),
+      });
+      return;
+    }
+
+    // Gestione Checkout/Checkin/Add/Book (data è il veicolo)
+    setSelectedBooking(null);
+    setSelectedVehicle(data);
+
+    if (data) {
+      // FIX P.2: Aggiorna la checklist per riflettere le dotazioni mancanti all'ultimo rientro
+      const missingItems = safeArray(data.missingChecklistItems);
+      const newChecklist = { ...initialChecklist };
+
+      if (data.status === "disponibile" && missingItems.length > 0) {
+        missingItems.forEach((id) => {
+          newChecklist[id] = false; // Spunta come mancante
+        });
+      }
+      setChecklist(newChecklist);
+
+      setFormData({
+        model: data.model,
+        plate: data.plate,
+        km: data.km,
+        fuel: data.fuel || "Pieno",
+        driver: data.driver || "",
+        commessa: data.commessa || "",
+        imageUrl: data.imageUrl || "",
+        currentSignature: null,
+        reservationDriver: "",
+        reservationCommessa: "",
+        reservationDateStart: now,
+        reservationDateEnd: futureTime,
+        // Data di rientro prevista dal veicolo corrente (se in uso)
+        returnDate:
+          data.returnDateExpected && data.returnDateExpected !== FAR_FUTURE_DATE
+            ? formatDateTimeLocal(data.returnDateExpected)
+            : "",
+        // Danni persistenti sul veicolo
+        persistentDamages: safeArray(data.persistentDamages),
+        damages: "", // Danni correnti puliti
+      });
+      // FIX P.1: NON CARICARE FOTO DANNI PREESISTENTI NEL CAMPO INPUT
+      setDamagePhotos([]);
     } else {
       setFormData({
-        imageUrl: "", // Inizializza l'immagine Base64
+        imageUrl: "",
         currentSignature: null,
+        reservationDriver: "",
+        reservationCommessa: "",
+        reservationDateStart: now,
+        reservationDateEnd: futureTime,
+        returnDate: "",
+        persistentDamages: [],
+        damages: "",
       });
     }
   };
@@ -1203,16 +1680,20 @@ const App = () => {
     setModalMode("editLog");
     setSelectedLog(log);
     setSelectedVehicle(null);
-    // PULISCI FIRMA: setSignature a null per forzare una nuova firma (PUNTO 3)
+    // PULISCIE FIRMA: setSignature a null per forzare una nuova firma (PUNTO 3)
     setSignature(null);
     setChecklist(log.checklist || {});
-    setPhotos(log.photos || []);
+    // Carica foto separate (Log: photos -> signalingPhotos; danni da persistenza -> damagePhotos)
+    setSignalingPhotos(safeArray(log.photos));
+    setDamagePhotos(safeArray(log.damagePhotos));
 
     setFormData({
       km: log.km,
       fuel: log.fuel,
       notes: log.notes || "",
       damages: log.damages || "",
+      // Danni persistenti dal log
+      persistentDamages: safeArray(log.persistentDamages),
       // Passiamo la firma originale per il rendering
       originalSignature: log.signature || null,
       currentSignature: null, // Firma per la modifica
@@ -1223,6 +1704,7 @@ const App = () => {
     setModalMode(null);
     setSelectedVehicle(null);
     setSelectedLog(null);
+    setSelectedBooking(null);
     setFormData({});
   };
 
@@ -1240,7 +1722,262 @@ const App = () => {
     }));
   };
 
+  // FUNZIONE: Ripara Veicolo (Pagina Danni)
+  const repairVehicle = async (
+    vehicle: any,
+    action:
+      | "start_maintenance"
+      | "end_maintenance"
+      | "full_repair"
+      | "full_repair_end"
+  ) => {
+    if (authRole !== "admin" || !db) return;
+
+    // Definizioni per i due tipi di manutenzione
+    const isFullRepairAction =
+      action === "full_repair" || action === "full_repair_end";
+
+    const isCurrentlyUnderRepair =
+      vehicle.status === "manutenzione" && vehicle.isUnderRepair;
+    const isCurrentlyUnderMaintenance =
+      vehicle.status === "manutenzione" && vehicle.isUnderMaintenance;
+    const isCurrentlyUnderAction =
+      isCurrentlyUnderRepair || isCurrentlyUnderMaintenance;
+
+    let updateData: any = {};
+    let successMessage = "";
+    let actionTitle = "";
+
+    if (isFullRepairAction) {
+      // Punto 1: Rinomina pulsante "Riparazione" -> "Ripristino"
+      actionTitle = isCurrentlyUnderRepair
+        ? "Termina Ripristino"
+        : "Inizia Ripristino";
+      if (action === "full_repair_end") {
+        // TERMINA RIPARAZIONE (Cancella Danni)
+        updateData = {
+          persistentDamages: [],
+          damagePhotos: [],
+          isUnderRepair: false,
+          isUnderMaintenance: false,
+          status: "disponibile",
+          missingChecklistItems: [],
+        };
+        successMessage = `Veicolo ${vehicle.plate} ripristino terminato. Danni azzerati.`;
+      } else {
+        // full_repair (Inizia)
+        // INIZIA RIPARAZIONE (Mette in manutenzione e blocca)
+        updateData = {
+          isUnderRepair: true,
+          status: "manutenzione",
+          isUnderMaintenance: false,
+        };
+        successMessage = `Veicolo ${vehicle.plate} messo in stato 'In Ripristino'.`;
+      }
+    } else {
+      // Manutenzione Leggera (action is 'start_maintenance' or 'end_maintenance')
+      actionTitle = isCurrentlyUnderMaintenance
+        ? "Termina Manutenzione"
+        : "Inizia Manutenzione";
+      if (action === "end_maintenance") {
+        // TERMINA MANUTENZIONE (Non cancella Danni)
+        updateData = { isUnderMaintenance: false, status: "disponibile" };
+        successMessage = `Veicolo ${vehicle.plate} manutenzione terminata.`;
+      } else {
+        // start_maintenance (Inizia)
+        // INIZIA MANUTENZIONE (Mette in manutenzione e blocca)
+        updateData = {
+          isUnderMaintenance: true,
+          status: "manutenzione",
+          isUnderRepair: false,
+        };
+        successMessage = `Veicolo ${vehicle.plate} messo in stato 'In Manutenzione'.`;
+      }
+    }
+
+    // Validazione per l'inizio di qualsiasi blocco (Riparazione o Manutenzione)
+    if (!isCurrentlyUnderAction && vehicle.status !== "disponibile") {
+      showToast(
+        `Impossibile iniziare l'azione. Il mezzo non è 'Disponibile'.`,
+        "error"
+      );
+      return;
+    }
+
+    // Validazione per Terminare un'azione che non è quella corrente
+    if (isCurrentlyUnderAction) {
+      if (isFullRepairAction && !isCurrentlyUnderRepair) {
+        showToast(
+          `Impossibile Termina Ripristino: il mezzo è in Manutenzione.`,
+          "error"
+        );
+        return;
+      }
+      if (!isFullRepairAction && !isCurrentlyUnderMaintenance) {
+        showToast(
+          `Impossibile Termina Manutenzione: il mezzo è in Ripristino.`,
+          "error"
+        );
+        return;
+      }
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: `${actionTitle} ${vehicle.model}`,
+      message: isCurrentlyUnderAction
+        ? `Sei sicuro di voler terminare l'azione? Lo stato tornerà a 'Disponibile'.`
+        : `Sei sicuro di voler iniziare l'azione? Lo stato verrà cambiato a 'Manutenzione' e il mezzo sarà bloccato.`,
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          const vehicleRef = getPublicDocRef("vehicles", vehicle.id);
+
+          await updateDoc(vehicleRef, updateData);
+          showToast(successMessage, "success");
+        } catch (err) {
+          // *** FIX ERRORE TRANSAZIONE: Logging dettagliato dell'errore. ***
+          console.error("ERRORE DURANTE updateDoc:", err);
+          showToast(
+            `Errore durante l'azione di ${actionTitle.toLowerCase()}. Controllare la console.`,
+            "error"
+          );
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
+
   // --- FUNZIONI DI GESTIONE (HANDLE...) ---
+
+  // FUNZIONE: Modifica Prenotazione (Punto 2)
+  const handleEditBooking = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db || !selectedBooking) return;
+
+    const { reservationDateStart, reservationDateEnd } = formData;
+    const vehicleToEdit = vehicles.find(
+      (v) => v.id === selectedBooking.vehicleId
+    );
+
+    // 1. Dati veicolo (per check conflitto con rientro attuale se in uso)
+    const vehicleData = vehicles.find(
+      (v) => v.id === selectedBooking.vehicleId
+    );
+    // USO la data lontana se non c'è il rientro previsto nel veicolo, solo per il calcolo.
+    const returnDateExpected =
+      vehicleData?.returnDateExpected || FAR_FUTURE_DATE;
+
+    // 2. Validazione Conflitti
+    const conflictMessage = checkBookingConflict(
+      selectedBooking.vehicleId,
+      reservationDateStart,
+      reservationDateEnd,
+      bookings,
+      selectedBooking.id, // Esclude la prenotazione corrente
+      vehicleData?.status, // Passa lo stato attuale
+      returnDateExpected // Passa il rientro previsto attuale
+    );
+
+    if (conflictMessage) {
+      showToast(conflictMessage, "error");
+      return;
+    }
+
+    try {
+      const bookingRef = getPublicDocRef("bookings", selectedBooking.id);
+
+      await updateDoc(bookingRef, {
+        driver: formData.reservationDriver,
+        commessa: formData.reservationCommessa || null,
+        date: reservationDateStart,
+        returnDate: reservationDateEnd,
+        lastModified: new Date().toISOString(),
+      });
+
+      closeModal();
+      showToast(
+        `Prenotazione per ${vehicleToEdit?.plate} aggiornata con successo.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      showToast("Errore aggiornamento prenotazione.", "error");
+    }
+  };
+
+  // FUNZIONE: Nuova Prenotazione
+  const handleBooking = async (e: any) => {
+    e.preventDefault();
+    if (authRole !== "admin" || !db || !selectedVehicle) return;
+
+    const { reservationDateStart, reservationDateEnd } = formData;
+
+    // 1. Dati veicolo (per check conflitto con rientro attuale se in uso)
+    const returnDateExpected =
+      selectedVehicle.returnDateExpected || FAR_FUTURE_DATE;
+
+    // 2. Validazione Conflitti
+    const conflictMessage = checkBookingConflict(
+      selectedVehicle.id,
+      reservationDateStart,
+      reservationDateEnd,
+      bookings,
+      null, // Nuova prenotazione, nessun ID da escludere
+      selectedVehicle.status, // Passa lo stato attuale
+      returnDateExpected // Passa il rientro previsto attuale
+    );
+
+    if (conflictMessage) {
+      showToast(conflictMessage, "error");
+      return;
+    }
+
+    try {
+      const bookingData = {
+        vehicleId: selectedVehicle.id,
+        vehicleModel: selectedVehicle.model,
+        plate: selectedVehicle.plate,
+        driver: formData.reservationDriver,
+        commessa: formData.reservationCommessa || null,
+        date: reservationDateStart, // Data Ritiro Presunta
+        returnDate: reservationDateEnd, // Data Rientro Presunta
+        createdAt: new Date().toISOString(),
+      };
+
+      await addDoc(getPublicCollectionPath("bookings"), bookingData);
+      closeModal();
+      showToast(
+        `Prenotazione per ${selectedVehicle.plate} salvata per ${formData.reservationDriver}.`,
+        "success"
+      );
+    } catch (err) {
+      console.error(err);
+      showToast("Errore salvataggio prenotazione.", "error");
+    }
+  };
+
+  // FUNZIONE: Elimina Prenotazione
+  const deleteBooking = async (bookingId: string) => {
+    if (authRole !== "admin" || !db) return;
+
+    setConfirmModal({
+      isOpen: true,
+      title: "Conferma Cancellazione Prenotazione",
+      message:
+        "Sei sicuro di voler eliminare questa prenotazione? L'operazione è irreversibile.",
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          await deleteDoc(getPublicDocRef("bookings", bookingId));
+          showToast("Prenotazione eliminata.", "success");
+        } catch (err) {
+          showToast("Errore cancellazione prenotazione.", "error");
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
 
   // FUNZIONE: Login (Punto 1)
   const handleLogin = (e: any) => {
@@ -1276,6 +2013,13 @@ const App = () => {
           driver: null,
           currentTripId: null,
           commessa: null,
+          returnDateExpected: null, // Nuovo campo rientro previsto
+          // NUOVI CAMPI DANNI PERSISTENTI (Inizializzati come array vuoto)
+          persistentDamages: [],
+          damagePhotos: [],
+          isUnderRepair: false, // Nuovo stato riparazione (per Riparazione Danni)
+          isUnderMaintenance: false, // Nuovo stato (Manutenzione senza azzeramento danni)
+          missingChecklistItems: [], // Dotazioni mancanti
         }
       );
       closeModal();
@@ -1365,18 +2109,43 @@ const App = () => {
         damages: formData.damages || "",
         checklist: checklist,
         signature: signature || selectedLog.signature, // Usa la nuova firma o quella precedente
-        photos: photos,
+        photos: signalingPhotos, // Photos ora sono solo le segnalazioni
+        damagePhotos: damagePhotos, // Nuove foto danni
         lastModified: new Date().toISOString(),
       });
 
-      // 2. Trova il veicolo e aggiorna il suo stato KM/Fuel
+      // 2. Aggiorna il record veicolo per i danni persistenti (solo se il log è il più recente)
       const vehicle = vehicles.find((v) => v.id === selectedLog.vehicleId);
       if (vehicle) {
         const vehicleRef = getPublicDocRef("vehicles", vehicle.id);
-        // Aggiorna solo i campi km e fuel, in base all'ultimo log salvato
+
+        // Somma i vecchi danni persistenti (se non siamo in modalità Consegna) con i nuovi
+        const currentPersistentDamages = safeArray(
+          selectedLog.persistentDamages
+        );
+        const newDamageEntry = formData.damages
+          ? [
+              {
+                tripId: selectedLog.tripId,
+                description: formData.damages,
+                photos: damagePhotos,
+              },
+            ]
+          : [];
+
+        // Se si modifica un log con danni, assumiamo che l'utente stia correggendo l'ultima registrazione di danno
+        const updatedPersistentDamages = [
+          ...currentPersistentDamages,
+          ...newDamageEntry,
+        ];
+        const updatedDamagePhotos = [...damagePhotos]; // Qui assumiamo che damagePhotos contenga tutto il set corretto
+
         await updateDoc(vehicleRef, {
           km: parseInt(formData.km) || vehicle.km,
           fuel: formData.fuel,
+          // Aggiorna anche i campi danno sul veicolo
+          persistentDamages: updatedPersistentDamages,
+          damagePhotos: updatedDamagePhotos,
         });
       }
 
@@ -1391,7 +2160,7 @@ const App = () => {
     }
   };
 
-  // FUNZIONE: Elimina Log (Storico) - IMPLEMENTATA per il punto 2
+  // FUNZIONE: Elimina Log (Storico)
   const deleteLog = async (logId: string) => {
     if (authRole !== "admin" || !db) {
       showToast(
@@ -1419,9 +2188,52 @@ const App = () => {
     });
   };
 
+  // FUNZIONE: Elimina Intero Trip (Storico)
+  const deleteTrip = async (tripId: string) => {
+    if (authRole !== "admin" || !db) {
+      showToast(
+        "Accesso negato: solo gli amministratori possono eliminare i report.",
+        "error"
+      );
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: `Conferma Eliminazione Trip #${tripId}`,
+      message: `Sei sicuro di voler eliminare permanentemente tutti i report associati al Trip #${tripId}? L'operazione è irreversibile.`,
+      onConfirm: async () => {
+        setConfirmModal({ isOpen: false });
+        try {
+          // Trova tutti i documenti log con questo tripId
+          const logsRef = getPublicCollectionPath("logs");
+          const q = query(logsRef, where("tripId", "==", tripId));
+          const snapshot = await getDocs(q);
+
+          let deletedCount = 0;
+
+          for (const doc of snapshot.docs) {
+            await deleteDoc(doc.ref);
+            deletedCount++;
+          }
+
+          showToast(
+            `Trip #${tripId} eliminato (cancellati ${deletedCount} report).`,
+            "success"
+          );
+        } catch (err) {
+          showToast(`Errore eliminazione Trip #${tripId}.`, "error");
+        }
+      },
+      onCancel: () => setConfirmModal({ isOpen: false }),
+    });
+  };
+
   // FUNZIONE: Transazione Check-in / Check-out (SALVA LOG SU DB)
   const handleTransaction = async (e: any) => {
     e.preventDefault();
+
+    // Validazione Firma Enforced (JS Enforced)
     if (!signature || !db) {
       showToast("Firma obbligatoria.", "error");
       return;
@@ -1429,13 +2241,120 @@ const App = () => {
 
     const type = modalMode === "checkout" ? "Consegna" : "Rientro"; // NOME AGGIORNATO
     const newStatus = modalMode === "checkout" ? "impegnato" : "disponibile";
+    const now = new Date().getTime();
 
     if (modalMode === "checkin" && parseInt(formData.km) < selectedVehicle.km) {
       showToast(
-        `I Km inseriti (${formData.km}) devono essere maggiori o uguali a quelli di Ritiro (${selectedVehicle.km}).`,
+        `I Km inseriti (${formData.km}) devono essere maggiori o uguali a quelli di Consegna (${selectedVehicle.km}).`,
         "error"
       );
       return;
+    }
+
+    // --- VALIDAZIONE PRENOTAZIONE SOLO PER CONSEGNA (CHECKOUT) ---
+    if (modalMode === "checkout") {
+      const plannedReturn = formData.returnDate
+        ? new Date(formData.returnDate).getTime()
+        : null;
+
+      // Trova la prima prenotazione futura
+      const firstFutureBooking = bookings
+        .filter(
+          (b) =>
+            b.vehicleId === selectedVehicle.id &&
+            new Date(b.returnDate || b.date).getTime() > now
+        )
+        .sort(
+          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+        )[0];
+
+      // 1. Check se il mezzo ha prenotazioni future (che non siano quella che sto evadendo)
+      const hasFutureBookingsNow = bookings.some(
+        (b) =>
+          b.vehicleId === selectedVehicle.id &&
+          new Date(b.returnDate || b.date).getTime() > now &&
+          b.id !== selectedBooking?.id
+      );
+
+      // Validazione: La prenotazione più vicina è già INIZIATA E non è la prenotazione che stiamo evadendo
+      if (
+        firstFutureBooking &&
+        now > new Date(firstFutureBooking.date).getTime() &&
+        firstFutureBooking.id !== selectedBooking?.id
+      ) {
+        showToast(
+          `ERRORE: Impossibile consegnare. La prenotazione di ${
+            firstFutureBooking.driver
+          } è iniziata il ${formatDate(
+            firstFutureBooking.date
+          )}. Modifica/Cancella prima la prenotazione scaduta.`,
+          "error"
+        );
+        return;
+      }
+
+      // 2. Validazione Rientro Previsto obbligatoria e controllo conflitto rigido
+      if (hasFutureBookingsNow) {
+        // Se ci sono prenotazioni future, la data di rientro è obbligatoria. (JS Enforced)
+        if (!formData.returnDate) {
+          showToast(
+            `La riconsegna deve avere una Data di Rientro Prevista per evitare conflitti con la prenotazione di ${
+              firstFutureBooking.driver
+            } del ${formatDate(firstFutureBooking.date)}.`,
+            "error"
+          );
+          return;
+        }
+
+        // Validazione CONFLITTO DATA INSERITA (Controlla se la data inserita è in conflitto con la prima prenotazione futura)
+        if (formData.returnDate) {
+          // Escludi la prenotazione che si sta per iniziare (solo se selectedBooking esiste).
+          const excludeBookingId = selectedBooking?.id || null;
+          const otherBookings = bookings.filter(
+            (b) => b.id !== excludeBookingId
+          );
+
+          const conflictMessage = checkBookingConflict(
+            selectedVehicle.id,
+            new Date().toISOString(), // Inizio Adesso
+            formData.returnDate,
+            otherBookings, // Usa la lista filtrata
+            null,
+            selectedVehicle.status,
+            selectedVehicle.returnDateExpected
+          );
+
+          if (conflictMessage) {
+            showToast(
+              `Errore di Sovrapposizione: La riconsegna prevista per il ${formatDate(
+                formData.returnDate
+              )} entra in conflitto con una prenotazione esistente. Modifica la data o la prenotazione.`,
+              "error"
+            );
+            return;
+          }
+        }
+      }
+      // Validazione Rientro Previsto per Mezzo Impegnato Senza data (usando l'escamotage 2099)
+      else if (
+        selectedVehicle.status === "impegnato" &&
+        !selectedVehicle.returnDateExpected
+      ) {
+        showToast(
+          `Errore: Impossibile consegnare un mezzo impegnato senza una Data di Rientro Prevista. Inserisci una data o modifica i dati del veicolo.`,
+          "error"
+        );
+        return;
+      }
+
+      // Punto 6: Blocca se in riparazione
+      if (selectedVehicle.isUnderRepair || selectedVehicle.isUnderMaintenance) {
+        showToast(
+          `ERRORE: Impossibile consegnare. Il veicolo è attualmente in manutenzione.`,
+          "error"
+        );
+        return;
+      }
     }
 
     try {
@@ -1447,6 +2366,40 @@ const App = () => {
       }
 
       const safeTripId = tripId || "N/A";
+
+      // --- LOGICA GESTIONE DANNI PERSISTENTI ---
+
+      const vehiclePersistentDamages = safeArray(
+        selectedVehicle.persistentDamages
+      );
+      const vehicleDamagePhotos = safeArray(selectedVehicle.damagePhotos);
+      const vehicleMissingChecklist = safeArray(
+        selectedVehicle.missingChecklistItems
+      );
+
+      // Danni e foto registrati dall'utente in questo log
+      const newDamagesEntry = (formData.damages || "").trim();
+      const newDamagePhotos = safeArray(damagePhotos); // Foto caricate ora nel form
+
+      // Dati che aggiornano il record veicolo
+      const newPersistentDamages = [...vehiclePersistentDamages];
+      const newDamagePhotosSet = new Set(vehicleDamagePhotos);
+
+      // *** FIX CRITICO P.4 & 5: Registriamo il danno solo se la descrizione non è vuota O ci sono foto ***
+      const hasNewDamageInfo =
+        newDamagesEntry.length > 0 || newDamagePhotos.length > 0;
+
+      if (hasNewDamageInfo) {
+        // Aggiungiamo il nuovo danno all'array persistente
+        newPersistentDamages.push({
+          tripId: safeTripId,
+          description: newDamagesEntry || "Danno non descritto, vedi foto.",
+        });
+        // Aggiorniamo il set delle foto persistenti sul veicolo (somma vecchie + nuove)
+        newDamagePhotos.forEach((photo: string) =>
+          newDamagePhotosSet.add(photo)
+        );
+      }
 
       const logData = {
         tripId: safeTripId,
@@ -1464,12 +2417,22 @@ const App = () => {
         km: parseInt(formData.km) || selectedVehicle.km,
         fuel: formData.fuel,
         notes: formData.notes || "",
-        damages: formData.damages || "",
+        damages: newDamagesEntry, // Danni registrati in questo log (Nuovi Danni/Danni Consegna)
         checklist,
-        photos,
+
+        // Foto separate:
+        signalingPhotos: signalingPhotos, // Foto Segnalazioni (solo log)
+        newDamagePhotos: newDamagePhotos, // Foto Danni (Log correnti)
+
+        // Danni Preesistenti AL MOMENTO del Log (per referenza storica)
+        persistentDamages: vehiclePersistentDamages,
+
         signature,
         // Inclusione dell'URL immagine veicolo per il PDF!
         imageUrl: selectedVehicle.imageUrl || null,
+        // Data di riconsegna prevista (solo al checkout)
+        returnDateExpected:
+          modalMode === "checkout" ? formData.returnDate || null : null,
       };
 
       // Aggiorna il veicolo
@@ -1482,20 +2445,70 @@ const App = () => {
         "vehicles",
         selectedVehicle.id
       );
-      await updateDoc(vehicleRef, {
+
+      // FIX PUNTO 2: La variabile deve essere inizializzata all'inizio
+      let updatedMissingChecklist = vehicleMissingChecklist;
+
+      // AGGIORNAMENTO DOTAZIONI MANCANTI
+      if (modalMode === "checkin") {
+        // Al rientro, calcola la lista di item mancanti e aggiorna il record veicolo
+        updatedMissingChecklist = CHECKLIST_ITEMS.filter(
+          (item) => !checklist[item.id]
+        ).map((item) => item.id);
+      }
+
+      const newVehicleData: any = {
         status: newStatus,
         driver: modalMode === "checkout" ? formData.driver : null,
         km: parseInt(formData.km) || selectedVehicle.km,
         fuel: formData.fuel,
         currentTripId: modalMode === "checkout" ? tripId : null,
         commessa: modalMode === "checkout" ? formData.commessa : null,
-      });
+        // Aggiorna il campo rientro previsto solo al checkout
+        returnDateExpected:
+          modalMode === "checkout" ? formData.returnDate || null : null,
+
+        // AGGIORNAMENTO DOTAZIONI MANCANTI
+        missingChecklistItems: updatedMissingChecklist,
+
+        // AGGIORNAMENTO DANNI PREESISTENTI SUL VEICOLO
+        // Aggiorna l'array di oggetti danni con i nuovi (sommati)
+        persistentDamages: newPersistentDamages,
+        // Aggiorna il set totale delle foto persistenti sul veicolo
+        damagePhotos: Array.from(newDamagePhotosSet),
+
+        // Manteniamo lo stato di Riparazione/Manutenzione
+        isUnderRepair: selectedVehicle.isUnderRepair,
+        isUnderMaintenance: selectedVehicle.isUnderMaintenance,
+      };
+
+      await updateDoc(vehicleRef, newVehicleData);
 
       // Aggiunge il log
       await addDoc(
         collection(db, "artifacts", appId, "public", "data", "logs"),
         logData
       );
+
+      // LOGICA AGGIUNTIVA: CANCELLA PRENOTAZIONE AL RIENTRO (CHECKIN)
+      if (modalMode === "checkin") {
+        const bookingIdToDelete = selectedVehicle.currentBookingId;
+        if (bookingIdToDelete) {
+          // CANCELLA la prenotazione che è stata soddisfatta
+          await deleteDoc(getPublicDocRef("bookings", bookingIdToDelete));
+          // Rimuovi l'associazione al veicolo (che è già fatto in updateDoc: currentBookingId: null)
+          showToast(
+            `Rientro completato e prenotazione ${bookingIdToDelete} cancellata.`,
+            "success"
+          );
+        }
+      }
+
+      // LOGICA AGGIUNTIVA: ASSOCIA PRENOTAZIONE ALLA CONSEGNA
+      if (modalMode === "checkout" && selectedBooking) {
+        // Se la consegna è partita da una prenotazione, associa la prenotazione al veicolo
+        await updateDoc(vehicleRef, { currentBookingId: selectedBooking.id });
+      }
 
       closeModal();
 
@@ -1506,7 +2519,8 @@ const App = () => {
       );
       generatePDF(logData);
     } catch (err) {
-      console.error(err);
+      // *** FIX ERRORE TRANSAZIONE: Logga l'errore per il debugging. ***
+      console.error("ERRORE DURANTE updateDoc:", err);
       showToast(
         "Errore salvataggio su Cloud. La transazione non è riuscita.",
         "error"
@@ -1526,36 +2540,57 @@ const App = () => {
     logsData.forEach((log: any) => {
       const tid = log.tripId || "LEGACY";
       if (!trips[tid]) {
-        trips[tid] = {
-          tripId: log.tripId,
-          vehicleModel: log.vehicleModel,
-          plate: log.plate,
-          commessa: log.commessa || "N/A",
-        };
+        trips[tid] = [];
       }
-
-      // Consegna (checkout) / Rientro (checkin)
-      const isConsegna = log.type === "Consegna";
-      const suffix = isConsegna ? "CONSEGNA" : "RIENTRO";
-
-      // Aggiungi i dati del movimento
-      trips[tid][`Data ${suffix}`] = formatDate(log.date);
-      trips[tid][`Driver ${suffix}`] = log.driver || "N/A";
-      trips[tid][`Km ${suffix}`] = log.km;
-      trips[tid][`Fuel ${suffix}`] = log.fuel;
-      trips[tid][`Danni ${suffix}`] = log.damages || "";
-      trips[tid][`Note ${suffix}`] = log.notes || "";
-
-      // La checklist è sempre la più recente (dal Rientro) o l'ultima registrazione
-      CHECKLIST_ITEMS.forEach((item) => {
-        // Usiamo la checklist del log più recente nel trip per la colonna finale
-        if (!trips[tid][item.label] || !isConsegna) {
-          trips[tid][item.label] = log.checklist?.[item.id] ? "SI" : "NO";
-        }
-      });
+      trips[tid].push(log);
     });
 
-    const aggregatedTrips = Object.values(trips);
+    // Processamento per la riga singola (simile a renderHistory ma per l'export)
+    const aggregatedTrips = Object.keys(trips).map((tripId) => {
+      // Ordina per data (Consegna prima di Rientro)
+      const logsInTrip = trips[tripId].sort(
+        (a: any, b: any) =>
+          new Date(a.date).getTime() - new Date(b.date).getTime()
+      );
+
+      const consegna = logsInTrip.find((l: any) => l.type === "Consegna");
+      const rientro = logsInTrip.find((l: any) => l.type === "Rientro");
+      const refLog = rientro || consegna || logsInTrip[0];
+
+      const tripOutput: any = {
+        "Trip ID": `#${tripId || "N/A"}`,
+        "Modello Veicolo": refLog.vehicleModel,
+        Targa: refLog.plate,
+        Commessa: refLog.commessa || "N/A",
+
+        "Data CONSEGNA": consegna ? formatDate(consegna.date) : "",
+        "Driver CONSEGNA": consegna ? consegna.driver || "N/A" : "",
+        "Km CONSEGNA": consegna ? consegna.km : "",
+        "Fuel CONSEGNA": consegna ? consegna.fuel : "",
+        "Danni CONSEGNA": consegna ? consegna.damages || "" : "",
+        "Note CONSEGNA": consegna ? consegna.notes || "" : "",
+
+        "Data RIENTRO": rientro ? formatDate(rientro.date) : "",
+        "Driver RIENTRO": rientro ? rientro.driver || "N/A" : "",
+        "Km RIENTRO": rientro ? rientro.km : "",
+        "Fuel RIENTRO": rientro ? rientro.fuel : "",
+        "Danni RIENTRO": rientro ? rientro.damages || "" : "",
+        "Note RIENTRO": rientro ? rientro.notes || "" : "",
+
+        // La checklist è sempre l'ultima disponibile (rientro se c'è, altrimenti consegna)
+      };
+
+      const checklistSource = rientro || consegna;
+      CHECKLIST_ITEMS.forEach((item) => {
+        tripOutput[`Dotazione ${item.label}`] = checklistSource?.checklist?.[
+          item.id
+        ]
+          ? "SI"
+          : "NO";
+      });
+
+      return tripOutput;
+    });
 
     if (aggregatedTrips.length === 0) {
       showToast("Nessun dato aggregato da esportare.", "error");
@@ -1565,26 +2600,8 @@ const App = () => {
     // Separatore: Punto e Virgola (;) per compatibilità EU Excel
     const SEPARATOR = ";";
 
-    // Intestazioni per il formato Trip Unico
-    const headers = [
-      "Trip ID",
-      "Modello Veicolo",
-      "Targa",
-      "Commessa",
-      "Data CONSEGNA",
-      "Driver CONSEGNA",
-      "Km CONSEGNA",
-      "Fuel CONSEGNA",
-      "Danni CONSEGNA",
-      "Note CONSEGNA",
-      "Data RIENTRO",
-      "Driver RIENTRO",
-      "Km RIENTRO",
-      "Fuel RIENTRO",
-      "Danni RIENTRO",
-      "Note RIENTRO",
-      ...CHECKLIST_ITEMS.map((item) => `Dotazione ${item.label}`),
-    ];
+    // Intestazioni (uso le chiavi del primo oggetto, garantendo l'ordine)
+    const headers = Object.keys(aggregatedTrips[0]);
 
     const csvRows = aggregatedTrips.map((trip: any) => {
       // Funzione per pulire e avvolgere un campo di testo nelle virgolette (necessario per CSV/XLS)
@@ -1612,32 +2629,16 @@ const App = () => {
         return cleanAndQuote(str);
       };
 
-      const checklistValues = CHECKLIST_ITEMS.map(
-        (item) => trip[item.label] || "N/A"
-      );
-
-      return [
-        cleanAndQuote(`#${trip.tripId || "N/A"}`),
-        cleanAndQuote(trip.vehicleModel),
-        cleanAndQuote(trip.plate),
-        cleanAndQuote(trip.commessa),
-
-        cleanAndQuote(trip["Data CONSEGNA"] || ""),
-        cleanAndQuote(trip["Driver CONSEGNA"] || ""),
-        cleanExcelValue(trip["Km CONSEGNA"] || ""),
-        cleanExcelValue(trip["Fuel CONSEGNA"] || ""),
-        cleanAndQuote(trip["Danni CONSEGNA"] || ""),
-        cleanAndQuote(trip["Note CONSEGNA"] || ""),
-
-        cleanAndQuote(trip["Data RIENTRO"] || ""),
-        cleanAndQuote(trip["Driver RIENTRO"] || ""),
-        cleanExcelValue(trip["Km RIENTRO"] || ""),
-        cleanExcelValue(trip["Fuel RIENTRO"] || ""),
-        cleanAndQuote(trip["Danni RIENTRO"] || ""),
-        cleanAndQuote(trip["Note RIENTRO"] || ""),
-
-        ...checklistValues.map((val) => cleanAndQuote(val)),
-      ].join(SEPARATOR);
+      return headers
+        .map((header) => {
+          const value = trip[header];
+          // Applica cleanExcelValue solo ai campi numerici o che possono essere confusi con frazioni
+          if (header.includes("Km") || header.includes("Fuel")) {
+            return cleanExcelValue(value);
+          }
+          return cleanAndQuote(value);
+        })
+        .join(SEPARATOR);
     });
 
     // Inserisce il Byte Order Mark (BOM) per garantire la corretta interpretazione di UTF-8 in Excel
@@ -1705,6 +2706,7 @@ const App = () => {
             <input
               id={item.id}
               type="checkbox"
+              // Usa lo stato locale `checklist` che è inizializzato a true per default
               checked={!!checklist[item.id]}
               onChange={(e) =>
                 setChecklist({
@@ -1726,13 +2728,137 @@ const App = () => {
     </div>
   );
 
-  // RIMOSSA LA FUNZIONE renderFullScreenSignatureModal
+  // RENDER SEZIONE DANNI PREESISTENTI (Sola lettura per il driver in Consegna/Rientro)
+  const renderPersistentDamages = (vehicle: any, isConsegna: boolean) => {
+    // FIX V87: Usiamo safeArray per garantire che i dati siano array
+    const damages = safeArray(vehicle.persistentDamages);
+    if (!vehicle || damages.length === 0) return null;
+
+    return (
+      <div className="border border-red-200 rounded-lg p-3 bg-red-50 space-y-2">
+        <h4 className="text-sm font-bold text-red-700 flex items-center gap-1">
+          <ShieldAlert className="w-4 h-4" /> Danni Preesistenti sul Veicolo
+        </h4>
+
+        {damages.map((damage: any, index: number) => (
+          <div
+            key={index}
+            className="text-sm text-red-800 border-l-2 border-red-500 pl-2"
+          >
+            <p className="font-semibold text-xs">Trip ID: #{damage.tripId}</p>
+            <p className="text-xs">{damage.description}</p>
+          </div>
+        ))}
+
+        {/* Visualizzazione Foto Danni Preesistenti */}
+        {safeArray(vehicle.damagePhotos).length > 0 && (
+          <div className="pt-2">
+            <p className="text-xs font-semibold text-red-700 mb-1">
+              Foto Danni:
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {safeArray(vehicle.damagePhotos).map(
+                (photo: string, idx: number) => (
+                  <div
+                    key={idx}
+                    className="w-12 h-12 rounded overflow-hidden border border-red-300"
+                  >
+                    <img
+                      src={photo}
+                      alt={`Danno ${idx}`}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderDamageInputs = (
+    isConsegna: boolean,
+    onShowToast: (msg: string, type: string) => void
+  ) => {
+    const isEditing = modalMode === "editLog";
+
+    const isVisible = isEditing || isConsegna || modalMode === "checkin";
+
+    if (!isVisible) return null;
+
+    // Titolo dinamico
+    const inputLabel = isEditing
+      ? "Danni / Anomalie (Revisione)"
+      : "Descrizione Danni";
+
+    const placeholderText = isEditing
+      ? "Descrivi eventuali correzioni o anomalie..."
+      : isConsegna
+      ? "Segnala graffi o danni già presenti..."
+      : "Descrivi chiaramente eventuali nuovi danni o anomalie riscontrate...";
+
+    return (
+      <>
+        {/* 1. CAMPO DANNI */}
+        <div className="bg-red-50 p-3 rounded-lg border border-red-100">
+          <label className="text-sm font-bold text-red-700 flex items-center gap-1 mb-2">
+            <AlertTriangle className="w-4 h-4" /> {inputLabel}
+          </label>
+          <textarea
+            className="w-full p-2 border border-red-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-red-500 outline-none"
+            rows={2}
+            value={formData.damages || ""}
+            onChange={(e) =>
+              setFormData({ ...formData, damages: e.target.value })
+            }
+            placeholder={placeholderText}
+          />
+        </div>
+
+        {/* 2. FOTO DANNI (Persistenti) */}
+        <DamagePhotoUpload
+          photos={damagePhotos}
+          setPhotos={setDamagePhotos}
+          onShowToast={onShowToast}
+          label="Foto Danni"
+        />
+
+        {/* 3. CAMPO SEGNALAZIONI */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Segnalazioni Generiche
+          </label>
+          <textarea
+            className="w-full p-3 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none"
+            rows={1}
+            value={formData.notes || ""}
+            onChange={(e) =>
+              setFormData({ ...formData, notes: e.target.value })
+            }
+            placeholder="Altre info utili..."
+          ></textarea>
+        </div>
+
+        {/* 4. FOTO SEGNALAZIONI (Solo Log) */}
+        <DamagePhotoUpload
+          photos={signalingPhotos}
+          setPhotos={setSignalingPhotos}
+          onShowToast={onShowToast}
+          label="Foto Segnalazioni Generiche"
+        />
+      </>
+    );
+  };
 
   const renderModal = () => {
     if (!modalMode || modalMode === "editLog") return null; // Non renderizza qui se è editLog
     const isConsegna = modalMode === "checkout";
     const isEdit = modalMode === "edit";
     const isAdd = modalMode === "add";
+    const isBook = modalMode === "book";
+    const isEditBook = modalMode === "editBook";
 
     // Nomi movimenti nel titolo della modale
     const movementName = isConsegna ? "Consegna" : "Rientro";
@@ -1741,6 +2867,24 @@ const App = () => {
     const currentSignature =
       signature || (modalMode === "editLog" ? selectedLog?.signature : null);
 
+    const vehicleRef =
+      selectedVehicle ||
+      vehicles.find((v) => v.id === selectedBooking?.vehicleId);
+
+    // Controlla se il campo Rientro Previsto è obbligatorio
+    const isReturnDateRequired =
+      !selectedBooking && hasFutureBookings(selectedVehicle?.id);
+
+    const title = isAdd
+      ? "Nuovo Mezzo"
+      : isEdit
+      ? `Modifica Veicolo: ${vehicleRef?.model}`
+      : isBook
+      ? `Prenota Veicolo: ${vehicleRef?.model}`
+      : isEditBook
+      ? `Modifica Prenotazione: ${vehicleRef?.model}`
+      : `${movementName}: ${vehicleRef?.model}`;
+
     return (
       <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm">
         <div className="flex min-h-full items-center justify-center p-4 text-center">
@@ -1748,22 +2892,24 @@ const App = () => {
           <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
             <div className="p-6">
               <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
-                <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
+                <h3 className="text-xl font-extrabold text-gray-700 flex items-center gap-3">
                   {isAdd && <Plus className="w-5 h-5 text-orange-600" />}
                   {isEdit && <Pencil className="w-5 h-5 text-blue-600" />}
+                  {(isBook || isEditBook) && (
+                    <Calendar className="w-5 h-5 text-purple-600" />
+                  )}
                   {/* Il pulsante Consegna è stato spostato sul rosso, quindi l'icona qui è coerente */}
                   {isConsegna && (
                     <ArrowRight className="w-5 h-5 text-red-600" />
                   )}
-                  {!isConsegna && !isAdd && !isEdit && (
-                    <CheckCircle className="w-5 h-5 text-green-600" />
-                  )}
+                  {!isConsegna &&
+                    !isAdd &&
+                    !isEdit &&
+                    !(isBook || isEditBook) && (
+                      <CheckCircle className="w-5 h-5 text-green-600" />
+                    )}
 
-                  {isAdd
-                    ? "Nuovo Mezzo"
-                    : isEdit
-                    ? `Modifica Veicolo: ${selectedVehicle?.model}`
-                    : `${movementName}: ${selectedVehicle?.model}`}
+                  {title}
                 </h3>
                 <button
                   type="button"
@@ -1774,8 +2920,110 @@ const App = () => {
                 </button>
               </div>
 
-              {/* MODULO AGGIUNTA o MODIFICA VEICOLO */}
-              {isAdd || isEdit ? (
+              {/* MODULO PRENOTAZIONE (NUOVA O MODIFICA) */}
+              {isBook || isEditBook ? (
+                <form
+                  onSubmit={isBook ? handleBooking : handleEditBooking}
+                  className="space-y-4"
+                >
+                  <p className="text-sm text-gray-600 border-l-4 border-purple-400 pl-3 py-1 bg-purple-50 rounded-r-lg">
+                    {isBook
+                      ? `Registrazione di una prenotazione futura per ${vehicleRef?.model} (${vehicleRef?.plate}).`
+                      : `Modifica prenotazione per ${vehicleRef?.model} (${vehicleRef?.plate}) - Driver originale: ${selectedBooking?.driver}`}
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Nome e Cognome (Prenotazione)
+                      </label>
+                      <input
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Nome Driver Prenotato"
+                        value={formData.reservationDriver || ""}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDriver: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Commessa (Opzionale)
+                      </label>
+                      <input
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        placeholder="Es. 23-050"
+                        value={formData.reservationCommessa || ""}
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationCommessa: e.target.value,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                  {/* Punti 3: Aggiunto input per data Rientro Presunta */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Data e Ora di Ritiro (Presunta)
+                      </label>
+                      <input
+                        type="datetime-local"
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        value={
+                          formData.reservationDateStart || formatDateTimeLocal()
+                        }
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDateStart: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Data e Ora di Rientro (Presunta)
+                      </label>
+                      <input
+                        type="datetime-local"
+                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none"
+                        value={
+                          formData.reservationDateEnd || formatDateTimeLocal()
+                        }
+                        onChange={(e) =>
+                          setFormData({
+                            ...formData,
+                            reservationDateEnd: e.target.value,
+                          })
+                        }
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3 pt-4 sticky bottom-0 bg-white border-t pt-4">
+                    <Button
+                      variant="secondary"
+                      onClick={closeModal}
+                      className="w-auto"
+                    >
+                      Annulla
+                    </Button>
+                    <Button variant="booking" type="submit" className="w-auto">
+                      <Plus className="w-5 h-5" />{" "}
+                      {isBook ? "Prenota" : "Aggiorna Prenotazione"}
+                    </Button>
+                  </div>
+                </form>
+              ) : // MODULO AGGIUNTA o MODIFICA VEICOLO O MOVIMENTI
+              isAdd || isEdit ? (
                 <form
                   onSubmit={isAdd ? handleAddVehicle : handleEditVehicle}
                   className="space-y-4"
@@ -1878,6 +3126,9 @@ const App = () => {
                     </div>
                   )}
 
+                  {/* Danni Preesistenti (Sola lettura per il driver) */}
+                  {renderPersistentDamages(selectedVehicle, isConsegna)}
+
                   {/* Dati Obbligatori (Driver / Km Attuali) */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {isConsegna && (
@@ -1924,63 +3175,59 @@ const App = () => {
 
                   {/* Commessa (solo Consegna) */}
                   {isConsegna && (
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Commessa (Opzionale)
-                      </label>
-                      <input
-                        className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
-                        placeholder="Es. 23-050"
-                        value={formData.commessa || ""}
-                        onChange={(e) =>
-                          setFormData({ ...formData, commessa: e.target.value })
-                        }
-                      />
+                    <div className="md:col-span-2 space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Commessa (Opzionale)
+                        </label>
+                        <input
+                          className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
+                          placeholder="Es. 23-050"
+                          value={formData.commessa || ""}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              commessa: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                      {/* CAMPO: Data Riconsegna Prevista (Punto 6) */}
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center gap-1">
+                          <Clock className="w-4 h-4 text-gray-500" /> Rientro
+                          Previsto{" "}
+                          {selectedBooking
+                            ? "(Da Prenotazione)"
+                            : hasFutureBookings(selectedVehicle?.id)
+                            ? "(Obbligatorio)"
+                            : "(Opzionale)"}
+                        </label>
+                        <input
+                          type="datetime-local"
+                          className="w-full border p-3 rounded-lg focus:ring-2 focus:ring-orange-500 outline-none"
+                          value={formData.returnDate || ""}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              returnDate: e.target.value,
+                            })
+                          }
+                          // RIMOSSO REQUIRED HTML - Ora gestito dal codice JS
+                        />
+                        <p className="text-[10px] text-gray-400 mt-1">
+                          Se specificato, verrà usato per controllare i
+                          conflitti con prenotazioni future.
+                        </p>
+                      </div>
                     </div>
                   )}
 
                   {renderFuelSelector()}
                   {renderChecklist()}
-                  <div className="bg-red-50 p-3 rounded-lg border border-red-100">
-                    <label className="text-sm font-bold text-red-700 flex items-center gap-1 mb-2">
-                      <AlertTriangle className="w-4 h-4" />{" "}
-                      {isConsegna
-                        ? "Danni Preesistenti (Opzionale)"
-                        : "Nuovi Danni / Anomalie (Importante)"}
-                    </label>
-                    <textarea
-                      className="w-full p-2 border border-red-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-red-500 outline-none"
-                      rows={2}
-                      value={formData.damages || ""}
-                      onChange={(e) =>
-                        setFormData({ ...formData, damages: e.target.value })
-                      }
-                      placeholder={
-                        isConsegna
-                          ? "Segnala graffi o danni già presenti (Opzionale)..."
-                          : "Descrivi chiaramente eventuali nuovi danni o anomalie riscontrate (Obbligatorio se presenti)..."
-                      }
-                    ></textarea>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Note Generali (Opzionale)
-                    </label>
-                    <textarea
-                      className="w-full p-3 border rounded-lg text-sm focus:ring-2 focus:ring-orange-500 outline-none"
-                      rows={1}
-                      value={formData.notes || ""}
-                      onChange={(e) =>
-                        setFormData({ ...formData, notes: e.target.value })
-                      }
-                      placeholder="Altre info utili..."
-                    ></textarea>
-                  </div>
-                  <PhotoUpload
-                    photos={photos}
-                    setPhotos={setPhotos}
-                    onShowToast={showToast}
-                  />
+
+                  {/* Input per Nuovi Danni (solo Rientro/Modifica Log) e Foto Danni/Segnalazioni */}
+                  {renderDamageInputs(isConsegna, showToast)}
 
                   {/* SEZIONE FIRMA STANDARD (Modale unica) */}
                   <div className="md:col-span-full">
@@ -1989,11 +3236,8 @@ const App = () => {
                       label="Firma Driver per Accettazione"
                       setFormData={setFormData}
                       initialSignature={signature || selectedVehicle?.signature}
-                      disclaimer={
-                        isConsegna
-                          ? "In caso di danneggiamento, qualora il danno ammonti ad un valore superiore ai 500€, la società si riserva il diritto di addebitare al dipendente il 20% dell'importo della riparazione."
-                          : null
-                      }
+                      modalMode={modalMode}
+                      disclaimer={isConsegna ? DAMAGE_DISCLAIMER : null}
                     />
                   </div>
 
@@ -2005,14 +3249,14 @@ const App = () => {
                     >
                       Annulla
                     </Button>
-                    {/* Testo aggiornato in Consegna/Rientro */}
+                    {/* Testo aggiornato (Punto 3) */}
                     <Button
                       type="submit"
                       loading={generatingPdf}
                       disabled={generatingPdf || !signature}
                       className="w-auto"
                     >
-                      {isConsegna ? "Conferma Consegna" : "Conferma Rientro"}
+                      {`Conferma ${movementName}`}
                     </Button>
                   </div>
                 </form>
@@ -2030,6 +3274,9 @@ const App = () => {
     // Determina la firma da mostrare nel piccolo box di anteprima (priorità alla nuova firma, poi all'originale)
     const currentSignature = signature || selectedLog.signature;
 
+    // Recupera il veicolo per i danni persistenti (necessario solo per il rendering se stiamo editando un log)
+    const vehicle = vehicles.find((v) => v.id === selectedLog.vehicleId);
+
     // ... Logica di rendering Modifica Log
     return (
       <div className="fixed inset-0 z-50 overflow-y-auto bg-black/60 backdrop-blur-sm">
@@ -2038,7 +3285,7 @@ const App = () => {
           <Card className="w-full sm:max-w-full md:max-w-xl transform text-left align-middle transition-all overflow-y-auto max-h-[90vh]">
             <div className="p-6">
               <div className="flex justify-between items-start border-b pb-4 mb-4 sticky top-0 bg-white z-10">
-                <h3 className="text-xl font-extrabold text-gray-900 flex items-center gap-3">
+                <h3 className="text-xl font-extrabold text-gray-700 flex items-center gap-3">
                   <Pencil className="w-5 h-5 text-purple-600" />
                   Modifica Log #{selectedLog.tripId} ({selectedLog.type})
                 </h3>
@@ -2077,6 +3324,12 @@ const App = () => {
                   </div>
                 </div>
 
+                {/* Danni Persistenti del veicolo al momento del log (solo visualizzazione) */}
+                {renderPersistentDamages(
+                  vehicle,
+                  selectedLog.type === "Consegna"
+                )}
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Km Attuali (Revisione)
@@ -2095,21 +3348,8 @@ const App = () => {
                 {renderFuelSelector()}
                 {renderChecklist()}
 
-                <div className="bg-red-50 p-3 rounded-lg border border-red-100">
-                  <label className="text-sm font-bold text-red-700 flex items-center gap-1 mb-2">
-                    <AlertTriangle className="w-4 h-4" /> Danni / Anomalie
-                    (Revisione)
-                  </label>
-                  <textarea
-                    className="w-full p-2 border border-red-200 rounded-lg bg-white text-sm focus:ring-2 focus:ring-red-500 outline-none"
-                    rows={2}
-                    value={formData.damages || ""}
-                    onChange={(e) =>
-                      setFormData({ ...formData, damages: e.target.value })
-                    }
-                    placeholder="Descrivi eventuali correzioni o anomalie..."
-                  ></textarea>
-                </div>
+                {/* Input per Nuovi Danni (solo Rientro/Modifica Log) e Foto Danni/Segnalazioni */}
+                {renderDamageInputs(selectedLog.type === "Consegna", showToast)}
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -2126,11 +3366,7 @@ const App = () => {
                   ></textarea>
                 </div>
 
-                <PhotoUpload
-                  photos={photos}
-                  setPhotos={setPhotos}
-                  onShowToast={showToast}
-                />
+                {/* PhotoUpload e DamagePhotoUpload già caricano i dati nello stato nel openLogModal */}
 
                 {/* SEZIONE FIRMA STANDARD (Modale unica) */}
                 <div className="md:col-span-full">
@@ -2139,7 +3375,8 @@ const App = () => {
                     label="Firma di Revisione/Conferma"
                     setFormData={setFormData}
                     initialSignature={signature || selectedLog?.signature}
-                    disclaimer="Per salvare le modifiche è necessario fornire una NUOVA firma."
+                    modalMode={modalMode}
+                    disclaimer={DAMAGE_DISCLAIMER}
                   />
                 </div>
 
@@ -2168,6 +3405,331 @@ const App = () => {
     );
   };
 
+  const renderBookingsPage = () => {
+    const now = new Date().getTime();
+
+    // 1. Dati Prenotazioni Future (quelle create dagli utenti)
+    const futureBookings = bookings
+      .filter((b) => new Date(b.returnDate || b.date).getTime() > now) // Filtra solo quelle future
+      .map((b) => ({ ...b, type: "BOOKING" }));
+
+    // 2. Dati Mezzi Fuori (Non da Prenotazione con Data Rientro Prevista)
+    const nonBookedEngagedVehicles = vehicles
+      // Includi SOLO mezzi impegnati SENZA prenotazione associata E con un RIENTRO PREVISTO NON NULLO (non fittizio)
+      .filter(
+        (v) =>
+          v.status === "impegnato" &&
+          !v.currentBookingId &&
+          v.returnDateExpected &&
+          v.returnDateExpected !== FAR_FUTURE_DATE
+      )
+      .map((v) => {
+        // Trova l'ultimo log di consegna per i dettagli
+        const lastConsegna = logs.find(
+          (l) => l.vehicleId === v.id && l.type === "Consegna"
+        );
+
+        return {
+          id: v.id,
+          type: "NON_BOOKED_OUT",
+          vehicleId: v.id,
+          vehicleModel: v.model,
+          plate: v.plate,
+          driver: v.driver,
+          commessa: v.commessa,
+          // Data Ritiro Reale (dal Log)
+          date: lastConsegna?.date || new Date().toISOString(),
+          // Data Rientro Prevista (dal Veicolo)
+          returnDate: v.returnDateExpected,
+        };
+      });
+
+    // 3. Unisci e Ordina (per data di ritiro/consegna)
+    const allActiveTrips = [
+      ...futureBookings,
+      ...nonBookedEngagedVehicles,
+    ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700 flex items-center gap-2">
+          <BookOpen className="w-6 h-6 text-purple-600" /> Calendario
+          Prenotazioni e Mezzi Fuori
+        </h2>
+
+        {allActiveTrips.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm border border-gray-100">
+            <Calendar className="w-10 h-10 mx-auto mb-3 text-gray-400" />
+            <p>Nessun mezzo fuori o prenotazione attiva registrata.</p>
+          </div>
+        ) : (
+          <Card>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Veicolo
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Driver / Commessa
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Ritiro/Consegna
+                    </th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Rientro Previsto
+                    </th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Azioni
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {allActiveTrips.map((b: any) => {
+                    const vehicle = vehicles.find((v) => v.id === b.vehicleId);
+                    const isBooking = b.type === "BOOKING";
+                    const isCheckedOutToThisBooking =
+                      isBooking && vehicle?.currentBookingId === b.id;
+                    const isNonBookedOut = b.type === "NON_BOOKED_OUT";
+
+                    return (
+                      <tr key={b.id + b.type} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          {b.vehicleModel} ({b.plate})
+                          {isNonBookedOut && (
+                            <span className="ml-2 text-[10px] font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full">
+                              NON DA PRENOTAZIONE
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {b.driver}
+                          <br />
+                          <span className="text-xs text-gray-500">
+                            Commessa: {b.commessa || "N/A"}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {formatDate(b.date)}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {formatDate(b.returnDate)}
+                          {isNonBookedOut && (
+                            <p className="text-xs text-red-500">
+                              (Rientro Previsto)
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <div className="flex justify-end gap-2">
+                            {isBooking && (
+                              <>
+                                {/* Pulsante Consegna (Checkout) da Prenotazione */}
+                                <button
+                                  onClick={() => openModal("book_checkout", b)}
+                                  className={`p-2 rounded-full transition-colors ${
+                                    isCheckedOutToThisBooking ||
+                                    vehicle?.status !== "disponibile"
+                                      ? "text-gray-400 cursor-not-allowed"
+                                      : "text-red-600 hover:text-red-900 hover:bg-red-50"
+                                  }`}
+                                  title={
+                                    isCheckedOutToThisBooking
+                                      ? "Consegna già avviata"
+                                      : vehicle?.status !== "disponibile"
+                                      ? "Veicolo in uso"
+                                      : "Inizia Consegna (Checkout)"
+                                  }
+                                  disabled={
+                                    isCheckedOutToThisBooking ||
+                                    vehicle?.status !== "disponibile"
+                                  }
+                                >
+                                  <ArrowRight className="w-4 h-4" />
+                                </button>
+                                {/* Pulsante Modifica Prenotazione */}
+                                <button
+                                  onClick={() => openModal("editBook", b)}
+                                  className="text-purple-600 hover:text-purple-900 p-2 rounded-full hover:bg-purple-50 transition-colors"
+                                  title="Modifica Prenotazione"
+                                >
+                                  <Pencil className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => deleteBooking(b.id)}
+                                  className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
+                                  title="Cancella Prenotazione"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </>
+                            )}
+                            {isNonBookedOut && (
+                              <span className="text-gray-500 text-xs py-2 px-3">
+                                Solo Visualizzazione
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        )}
+      </div>
+    );
+  };
+
+  const renderDamagePage = () => {
+    // Filtra solo i veicoli che hanno danni persistenti
+    const damagedVehicles = vehicles.filter(
+      (v) => hasPersistentDamages(v) || v.isUnderRepair || v.isUnderMaintenance
+    );
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-extrabold text-gray-700 flex items-center gap-2">
+          <Wrench className="w-6 h-6 text-red-600" /> Gestione Danni
+        </h2>
+
+        {damagedVehicles.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm border border-gray-100">
+            <CheckCircle className="w-10 h-10 mx-auto mb-3 text-green-600" />
+            <p>Nessun veicolo con danni persistenti o in manutenzione.</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {damagedVehicles.map((v) => {
+              const isCurrentlyUnderRepair =
+                v.status === "manutenzione" && v.isUnderRepair;
+              const isCurrentlyUnderMaintenance =
+                v.status === "manutenzione" && v.isUnderMaintenance;
+
+              // Stato pulsanti
+              const repairDisabled =
+                v.status !== "disponibile" && !isCurrentlyUnderRepair;
+              const maintenanceDisabled =
+                v.status !== "disponibile" && !isCurrentlyUnderMaintenance;
+
+              // FIX: Solo Ripristino (Riparazione Danni) rimane
+              const buttonTextRipristino = isCurrentlyUnderRepair
+                ? "Termina Ripristino"
+                : "Inizia Ripristino";
+              const buttonTextManutenzione = isCurrentlyUnderMaintenance
+                ? "Termina Manutenzione"
+                : "Inizia Manutenzione";
+
+              return (
+                <Card key={v.id} className="p-4 space-y-4">
+                  <div className="flex justify-between items-start border-b pb-3 mb-3">
+                    <div className="flex items-center gap-3">
+                      <h3 className="text-xl font-bold text-gray-900">
+                        {v.model}
+                      </h3>
+                      <Badge
+                        status={v.status}
+                        isUnderRepair={v.isUnderRepair}
+                        isUnderMaintenance={v.isUnderMaintenance}
+                      />
+                    </div>
+                    <p className="text-sm font-mono text-gray-600">{v.plate}</p>
+                  </div>
+
+                  {/* Danni Dettagliati */}
+                  {safeArray(v.persistentDamages).length > 0 && (
+                    <div className="space-y-3">
+                      <h4 className="text-sm font-semibold text-red-700">
+                        Danni Registrati:
+                      </h4>
+                      {safeArray(v.persistentDamages).map(
+                        (damage: any, index: number) => (
+                          <div
+                            key={index}
+                            className="border-l-4 border-red-400 pl-3"
+                          >
+                            <p className="font-semibold text-sm text-red-700">
+                              Danno # {index + 1} (Trip ID: #{damage.tripId})
+                            </p>
+                            <p className="text-sm text-gray-700">
+                              {damage.description}
+                            </p>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+
+                  {/* Foto Danni Preesistenti */}
+                  {safeArray(v.damagePhotos).length > 0 && (
+                    <div className="pt-2">
+                      <p className="text-sm font-semibold text-red-700 mb-1">
+                        Foto Documentazione:
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {safeArray(v.damagePhotos).map(
+                          (photo: string, idx: number) => (
+                            <div
+                              key={idx}
+                              className="w-16 h-16 rounded overflow-hidden border border-red-300"
+                            >
+                              <img
+                                src={photo}
+                                alt={`Danno ${idx}`}
+                                className="w-full h-full object-cover"
+                              />
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="pt-3 border-t grid grid-cols-2 gap-3">
+                    {/* 1. PULSANTE RIPRISTINO (Cancella danni) */}
+                    <Button
+                      variant={isCurrentlyUnderRepair ? "success" : "admin"}
+                      onClick={() =>
+                        repairVehicle(
+                          v,
+                          isCurrentlyUnderRepair
+                            ? "full_repair_end"
+                            : "full_repair"
+                        )
+                      }
+                      disabled={repairDisabled && !isCurrentlyUnderRepair}
+                      title={
+                        repairDisabled
+                          ? "Mezzo non disponibile per iniziare il Ripristino."
+                          : ""
+                      }
+                    >
+                      {buttonTextRipristino}
+                    </Button>
+
+                    {/* 2. PULSANTE MANUTENZIONE (Non cancella danni) */}
+                    {/* RIMOSSO QUESTO BLOCCO DALLA PAGINA DANNI - SOLO FLOTTA */}
+                    {/* <Button 
+                                        variant={isCurrentlyUnderMaintenance ? "success" : "maintenance"}
+                                        onClick={() => repairVehicle(v, isCurrentlyUnderMaintenance ? 'end_maintenance' : 'start_maintenance')}
+                                        disabled={maintenanceDisabled && !isCurrentlyUnderMaintenance}
+                                        title={maintenanceDisabled ? "Mezzo non disponibile per iniziare la manutenzione." : ""}
+                                    >
+                                        {buttonTextManutenzione}
+                                    </Button> */}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderLogin = () => (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 p-4">
       <Card className="max-w-sm w-full p-6 text-center">
@@ -2181,11 +3743,11 @@ const App = () => {
         </p>
         <form onSubmit={handleLogin} className="space-y-4">
           <input
-            type="password"
+            type="password" // CORRETTO: type="password" per nascondere il PIN
             placeholder="PIN"
             value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            className="w-full border p-3 rounded-lg text-center tracking-[0.5em] font-mono text-lg focus:ring-2 focus:ring-orange-500 outline-none"
+            onChange={(e) => setPinInput(e.target.value.toUpperCase())} // Legge e converte in maiuscolo
+            className="w-full border p-3 rounded-lg text-center tracking-[0.5em] font-mono text-lg focus:ring-2 focus:ring-orange-500 outline-none uppercase"
             maxLength={PIN_UNICO.length}
             required
           />
@@ -2198,16 +3760,65 @@ const App = () => {
   );
 
   const renderDashboard = () => {
+    // Funzione helper per determinare se il veicolo ha una prenotazione attiva o futura (per il badge)
+    const isVehicleBookedNow = (
+      vehicleId: string,
+      currentBookingId: string | null
+    ) => {
+      // Cerca se il veicolo ha UNA QUALSIERI prenotazione che non è ancora scaduta.
+      const now = new Date().getTime();
+
+      return bookings.some((b) => {
+        if (
+          b.vehicleId === vehicleId &&
+          new Date(b.returnDate || b.date).getTime() > now
+        ) {
+          if (b.id === currentBookingId) {
+            // E' la prenotazione in corso: mostriamo il badge solo se ci sono altre prenotazioni future
+            return bookings.some(
+              (otherB) =>
+                otherB.vehicleId === vehicleId &&
+                otherB.id !== currentBookingId &&
+                new Date(otherB.returnDate || otherB.date).getTime() > now
+            );
+          }
+          // E' una prenotazione futura
+          return true;
+        }
+        return false;
+      });
+    };
+
+    // Filtro e ricerca
     const filteredVehicles = vehicles.filter(
       (v) =>
-        v.model.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.plate.toLowerCase().includes(searchDashboardTerm.toLowerCase()) ||
-        v.driver?.toLowerCase().includes(searchDashboardTerm.toLowerCase())
+        (v.model?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        ) ||
+        (v.plate?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        ) ||
+        (v.driver?.toLowerCase() || "").includes(
+          searchDashboardTerm.toLowerCase()
+        )
     );
 
-    const available = vehicles.filter((v) => v.status === "disponibile");
+    const available = vehicles.filter(
+      (v) =>
+        v.status === "disponibile" && !v.isUnderRepair && !v.isUnderMaintenance
+    );
     const engaged = vehicles.filter((v) => v.status === "impegnato");
     const totalVehicles = vehicles.length; // Calcolo Totale Veicoli
+
+    // Prenotazioni attive (solo quelle con rientro futuro o attuale)
+    const activeBookings = bookings.filter(
+      (b) => new Date(b.returnDate || b.date).getTime() > new Date().getTime()
+    );
+    const totalBookings = activeBookings.length;
+    // Veicoli con danni persistenti
+    const damagedVehicleCount = vehicles.filter(
+      (v) => hasPersistentDamages(v) || v.isUnderRepair || v.isUnderMaintenance
+    ).length;
 
     return (
       <div className="space-y-6">
@@ -2215,8 +3826,8 @@ const App = () => {
           Dashboard Flotta
         </h2>
 
-        {/* Rimosso il contatore Manutenzione -> Griglia a 3 colonne */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+        {/* Griglia Statistiche */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <Card className="p-4 flex items-center gap-4 bg-gray-100">
             <div className="bg-slate-700 p-3 rounded-full text-white">
               <Car className="w-6 h-6" />
@@ -2245,7 +3856,113 @@ const App = () => {
               <strong className="text-3xl font-bold">{engaged.length}</strong>
             </div>
           </Card>
+          {/* Box Prenotazioni */}
+          <Card className="p-4 flex items-center gap-4 bg-purple-50">
+            <div className="bg-purple-600 p-3 rounded-full text-white">
+              <Calendar className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm text-gray-600">Prenotati</p>{" "}
+              {/* Testo aggiornato */}
+              <strong className="text-3xl font-bold">{totalBookings}</strong>
+            </div>
+          </Card>
         </div>
+
+        {/* Griglia Danni (Nuovo Box) */}
+        {damagedVehicleCount > 0 && (
+          <Card className={`p-4 space-y-3 border-red-300 bg-red-50`}>
+            <h3 className="text-lg font-bold text-red-800 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <Wrench className="w-5 h-5" /> Veicoli Danneggiati
+              </span>
+              <button
+                onClick={() => setView("danni")}
+                className="text-xs text-red-600 hover:text-red-800 flex items-center gap-1 transition-colors font-medium"
+              >
+                Vai a Riparazioni <ArrowRight className="w-3 h-3" />
+              </button>
+            </h3>
+            <p className="text-sm text-gray-700">
+              Ci sono {damagedVehicleCount} veicoli con danni persistenti che
+              richiedono intervento.
+            </p>
+          </Card>
+        )}
+
+        {/* Visualizzazione Prossime Prenotazioni (Punto 3) */}
+        <Card
+          className={`p-4 space-y-3 ${
+            totalBookings > 0
+              ? "border-purple-300 bg-purple-50"
+              : "border-gray-300 bg-white"
+          }`}
+        >
+          <h3 className="text-lg font-bold text-purple-800 flex items-center gap-2">
+            <Calendar className="w-5 h-5" /> Prossime Prenotazioni
+          </h3>
+
+          {totalBookings === 0 ? (
+            <p className="text-sm text-gray-500">
+              Nessuna prenotazione attiva o futura.
+            </p>
+          ) : (
+            activeBookings
+              .sort(
+                (a, b) =>
+                  new Date(a.date).getTime() - new Date(b.date).getTime()
+              )
+              .slice(0, 3)
+              .map((b) => {
+                // Trova lo stato del veicolo e controlla se la prenotazione è "In Corso"
+                const vehicle = vehicles.find((v) => v.id === b.vehicleId);
+                const isCheckedOutToThisBooking =
+                  vehicle?.currentBookingId === b.id;
+
+                // FIX P.1: Il pulsante Consegna è disabilitato se il veicolo è già in uso.
+                const isConsegnaDisabled = vehicle?.status !== "disponibile";
+
+                return (
+                  <div
+                    key={b.id}
+                    className="text-sm text-purple-700 flex justify-between items-center"
+                  >
+                    <p>
+                      {/* Aggiunto Marca e Modello (Punto 3) */}
+                      <strong className="font-semibold">
+                        {b.vehicleModel} ({b.plate})
+                      </strong>{" "}
+                      per {b.driver}
+                      <span className="text-xs text-purple-600 ml-2">
+                        ({formatDate(b.date)})
+                      </span>
+                    </p>
+                    {isCheckedOutToThisBooking ? (
+                      <BookingInUseBadge />
+                    ) : (
+                      // PULSANTE CONSEGNA DIRETTA (al posto di Inizia in)
+                      <button
+                        onClick={() => openModal("book_checkout", b)}
+                        className={`text-xs font-medium flex items-center gap-1 ${
+                          isConsegnaDisabled
+                            ? "text-gray-400 cursor-not-allowed"
+                            : "text-red-600 hover:text-red-800"
+                        }`}
+                        disabled={isConsegnaDisabled}
+                        title={
+                          isConsegnaDisabled
+                            ? `Veicolo in uso da ${vehicle?.driver}`
+                            : "Inizia Consegna (Checkout)"
+                        }
+                      >
+                        <ArrowRight className="w-3 h-3" /> Consegna
+                      </button>
+                    )}
+                  </div>
+                );
+              })
+          )}
+        </Card>
 
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
@@ -2272,90 +3989,147 @@ const App = () => {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredVehicles.map((v) => (
-              <Card
-                key={v.id}
-                className="p-4 flex items-start gap-4 hover:shadow-md transition-shadow"
-              >
-                {/* Immagine veicolo o placeholder */}
-                <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0">
-                  {v.imageUrl ? (
-                    <img
-                      src={v.imageUrl}
-                      alt={v.model}
-                      className="w-full h-full object-cover border border-gray-200"
-                      onError={(e) => {
-                        // Fallback se l'immagine base64 è corrotta
-                        const target = e.target as HTMLImageElement;
-                        target.onerror = null;
-                        target.src = `https://placehold.co/64x64/f97316/ffffff?text=${v.plate}`;
-                        target.style.objectFit = "contain";
-                      }}
-                    />
-                  ) : (
-                    <div className="w-full h-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold border border-gray-200">
-                      {v.plate || "NO IMG"}
-                    </div>
-                  )}
-                </div>
+            {filteredVehicles.map((v) => {
+              const isCurrentlyBooked = isVehicleBooked(
+                v.id,
+                v.currentBookingId
+              );
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex justify-between items-start mb-1">
-                    <h3 className="text-lg font-bold truncate text-gray-900">
-                      {v.model}
-                    </h3>
-                    <Badge status={v.status} />
-                  </div>
-                  <p className="text-sm text-gray-600 font-mono mb-2">
-                    {v.plate}
-                  </p>
+              // Data rientro prevista per i mezzi in uso
+              const expectedReturn =
+                v.status === "impegnato" &&
+                v.returnDateExpected &&
+                v.returnDateExpected !== FAR_FUTURE_DATE
+                  ? formatDate(v.returnDateExpected)
+                  : null;
 
-                  {/* Info Aggiuntive e Bottone */}
-                  <div className="mt-2 text-xs text-gray-500 space-y-1">
-                    <p>
-                      <strong>Km:</strong> {v.km} |<strong> Fuel:</strong>{" "}
-                      {v.fuel}
-                    </p>
-                    {v.status === "impegnato" && (
-                      <p className="text-orange-700">
-                        <User className="inline w-3 h-3 mr-1" />
-                        <strong>Driver:</strong> {v.driver || "N/A"} (Commessa:{" "}
-                        {v.commessa || "N/A"})
-                      </p>
-                    )}
-                  </div>
+              // Check se prenotabile: Non prenotabile se impegnato E non ha data di rientro prevista
+              const isBookable =
+                v.status !== "impegnato" ||
+                (v.status === "impegnato" &&
+                  v.returnDateExpected &&
+                  v.returnDateExpected !== FAR_FUTURE_DATE);
 
-                  <div className="mt-4 flex gap-3">
-                    {/* Testo bottoni in Consegna/Rientro */}
-                    {v.status === "disponibile" ? (
-                      <Button
-                        variant="primary" // Ora in rosso
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        onClick={() => openModal("checkout", v)}
-                      >
-                        <ArrowRight className="w-4 h-4" /> Consegna
-                      </Button>
-                    ) : v.status === "impegnato" ? (
-                      <Button
-                        variant="success"
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        onClick={() => openModal("checkin", v)}
-                      >
-                        <CheckCircle className="w-4 h-4" /> Rientro
-                      </Button>
+              return (
+                <Card
+                  key={v.id}
+                  className="p-4 flex items-start gap-4 hover:shadow-md transition-shadow"
+                >
+                  {/* Immagine veicolo o placeholder */}
+                  <div className="w-16 h-16 rounded-lg overflow-hidden shrink-0">
+                    {v.imageUrl ? (
+                      <img
+                        src={v.imageUrl}
+                        alt={v.model}
+                        className="w-full h-full object-cover border border-gray-200"
+                        onError={(e) => {
+                          // Fallback se l'immagine base64 è corrotta
+                          const target = e.target as HTMLImageElement;
+                          target.onerror = null;
+                          target.src = `https://placehold.co/64x64/f97316/ffffff?text=${v.plate}`;
+                          target.style.objectFit = "contain";
+                        }}
+                      />
                     ) : (
-                      <Button
-                        variant="danger"
-                        className="text-sm py-2 px-3 flex-1 sm:flex-none"
-                        disabled
-                      >
-                        Zap In Manutenzione
-                      </Button>
+                      <div className="w-full h-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold border border-gray-200">
+                        {v.plate || "NO IMG"}
+                      </div>
                     )}
                   </div>
-                </div>
-              </Card>
-            ))}
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex justify-between items-start mb-1">
+                      <h3 className="text-lg font-bold truncate text-gray-900">
+                        {v.model}
+                      </h3>
+                      <div className="flex gap-1 items-center">
+                        {v.persistentDamages?.length > 0 && <DamageBadge />}
+                        {isCurrentlyBooked && <BookingBadge />}
+                        <Badge
+                          status={v.status}
+                          isUnderRepair={v.isUnderRepair}
+                          isUnderMaintenance={v.isUnderMaintenance}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-sm text-gray-600 font-mono mb-2">
+                      {v.plate}
+                    </p>
+
+                    {/* Info Aggiuntive e Bottone */}
+                    <div className="mt-2 text-xs text-gray-500 space-y-1">
+                      <p>
+                        <strong>Km:</strong> {v.km} |<strong> Fuel:</strong>{" "}
+                        {v.fuel}
+                      </p>
+                      {v.status === "impegnato" && (
+                        <>
+                          <p className="text-orange-700">
+                            <User className="inline w-3 h-3 mr-1" />
+                            <strong>Driver:</strong> {v.driver || "N/A"}{" "}
+                            (Commessa: {v.commessa || "N/A"})
+                          </p>
+                          {/* Rientro Previsto (Punto 7) */}
+                          {expectedReturn && (
+                            <p className="text-red-700">
+                              <Clock className="inline w-3 h-3 mr-1" />
+                              <strong>Rientro Previsto:</strong>{" "}
+                              {expectedReturn}
+                            </p>
+                          )}
+                        </>
+                      )}
+
+                      {/* Pulsante Prenota sul veicolo */}
+                      {isBookable ? (
+                        <button
+                          onClick={() => openModal("book", v)}
+                          className="mt-2 text-xs font-medium text-purple-600 hover:text-purple-800 flex items-center gap-1 transition-colors"
+                        >
+                          <Calendar className="w-4 h-4" /> Prenota
+                        </button>
+                      ) : v.status === "impegnato" ? (
+                        <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
+                          Non Prenotabile (Rientro Non Previsto)
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-4 flex gap-3">
+                      {/* Testo bottoni in Consegna/Rientro */}
+                      {v.status === "disponibile" ? (
+                        <Button
+                          variant="primary" // Ora in rosso
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          onClick={() => openModal("checkout", v)}
+                          disabled={v.isUnderRepair || v.isUnderMaintenance} // Non consegnabile se in riparazione o manutenzione
+                        >
+                          <ArrowRight className="w-4 h-4" /> Consegna
+                        </Button>
+                      ) : v.status === "impegnato" ? (
+                        <Button
+                          variant="success"
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          onClick={() => openModal("checkin", v)}
+                        >
+                          <CheckCircle className="w-4 h-4" /> Rientro
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="danger"
+                          className="text-sm py-2 px-3 flex-1 sm:flex-none"
+                          disabled
+                        >
+                          {v.isUnderRepair
+                            ? "In Ripristino"
+                            : "In Manutenzione"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         )}
       </div>
@@ -2365,8 +4139,10 @@ const App = () => {
   const renderFleet = () => {
     const filteredVehicles = vehicles.filter(
       (v) =>
-        v.model.toLowerCase().includes(searchFleetTerm.toLowerCase()) ||
-        v.plate.toLowerCase().includes(searchFleetTerm.toLowerCase())
+        (v.model?.toLowerCase() || "").includes(
+          searchFleetTerm.toLowerCase()
+        ) ||
+        (v.plate?.toLowerCase() || "").includes(searchFleetTerm.toLowerCase())
     );
 
     return (
@@ -2410,7 +4186,7 @@ const App = () => {
                     Km
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">
-                    Driver
+                    Driver Corrente
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Stato
@@ -2421,62 +4197,146 @@ const App = () => {
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {filteredVehicles.map((v) => (
-                  <tr key={v.id}>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                      <div className="flex items-center gap-3">
-                        {v.imageUrl && (
-                          <img
-                            src={v.imageUrl}
-                            alt={v.model}
-                            className="w-8 h-8 object-cover rounded-full"
-                            onError={(e) => {
-                              const target = e.target as HTMLImageElement;
-                              target.onerror = null;
-                              target.src =
-                                "https://placehold.co/32x32/f97316/ffffff?text=C";
-                            }}
-                          />
-                        )}
-                        {!v.imageUrl && (
-                          <Car className="w-5 h-5 text-gray-400" />
-                        )}
-                        {v.model}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
-                      {v.plate}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden sm:table-cell">
-                      {v.km}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden md:table-cell">
-                      {v.driver || "N/A"}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <Badge status={v.status} />
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <div className="flex justify-end gap-2">
-                        <button
-                          onClick={() => openModal("edit", v)}
-                          className="text-blue-600 hover:text-blue-900 p-2 rounded-full hover:bg-blue-50 transition-colors"
-                          title="Modifica"
-                        >
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => deleteVehicle(v.id)}
-                          className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
-                          title="Elimina"
-                          disabled={v.status !== "disponibile"} // Disabilita se in uso
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {filteredVehicles.map((v) => {
+                  const nextBooking = bookings
+                    .filter(
+                      (b) =>
+                        b.vehicleId === v.id &&
+                        new Date(b.returnDate || b.date).getTime() >
+                          new Date().getTime()
+                    )
+                    .sort(
+                      (a, b) =>
+                        new Date(a.date).getTime() - new Date(b.date).getTime()
+                    )[0];
+
+                  // Non prenotabile se impegnato E non ha data di rientro prevista
+                  const isBookable =
+                    v.status !== "impegnato" ||
+                    (v.status === "impegnato" &&
+                      v.returnDateExpected &&
+                      v.returnDateExpected !== FAR_FUTURE_DATE);
+
+                  return (
+                    <tr
+                      key={v.id}
+                      className="group hover:bg-gray-50 transition-colors"
+                    >
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        <div className="flex items-center gap-3">
+                          {v.imageUrl && (
+                            <img
+                              src={v.imageUrl}
+                              alt={v.model}
+                              className="w-8 h-8 object-cover rounded-full"
+                              onError={(e) => {
+                                const target = e.target as HTMLImageElement;
+                                target.onerror = null;
+                                target.src =
+                                  "https://placehold.co/32x32/f97316/ffffff?text=C";
+                              }}
+                            />
+                          )}
+                          {!v.imageUrl && (
+                            <Car className="w-5 h-5 text-gray-400" />
+                          )}
+                          <div>
+                            {v.model}
+                            {nextBooking && (
+                              <p className="text-[10px] text-purple-600 flex items-center gap-1 mt-0.5">
+                                <Calendar className="w-3 h-3" /> Prenotato da{" "}
+                                {nextBooking.driver} (
+                                {formatShortDate(nextBooking.date)})
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 font-mono">
+                        {v.plate}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden sm:table-cell">
+                        {v.km}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 hidden md:table-cell">
+                        {v.driver || "N/A"}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <Badge
+                          status={v.status}
+                          isUnderRepair={v.isUnderRepair}
+                          isUnderMaintenance={v.isUnderMaintenance}
+                        />
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <div className="flex justify-end gap-2">
+                          {/* PULSANTE PRENOTA MEZZO IMPEGNATO (Punto 2) */}
+                          {isBookable && (
+                            <button
+                              onClick={() => openModal("book", v)}
+                              className="text-purple-600 hover:text-purple-900 p-2 rounded-full hover:bg-purple-50 transition-colors"
+                              title="Prenota questo veicolo"
+                            >
+                              <Calendar className="w-4 h-4" />
+                            </button>
+                          )}
+                          {!isBookable && v.status === "impegnato" && (
+                            <span className="text-xs text-red-500 py-2">
+                              Non Prenotabile
+                            </span>
+                          )}
+                          {/* PULSANTE INIZIA/TERMINA MANUTENZIONE (Punto 3) */}
+                          {(v.status === "disponibile" ||
+                            v.isUnderMaintenance) && (
+                            <button
+                              onClick={() =>
+                                repairVehicle(
+                                  v,
+                                  v.isUnderMaintenance
+                                    ? "end_maintenance"
+                                    : "start_maintenance"
+                                )
+                              }
+                              className={`p-2 rounded-full transition-colors ${
+                                v.isUnderMaintenance
+                                  ? "text-green-600 hover:bg-green-50"
+                                  : "text-blue-600 hover:bg-blue-50"
+                              }`}
+                              title={
+                                v.isUnderMaintenance
+                                  ? "Termina Manutenzione"
+                                  : "Inizia Manutenzione"
+                              }
+                              disabled={v.isUnderRepair}
+                            >
+                              <Wrench className="w-4 h-4" />
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => openModal("edit", v)}
+                            className="text-blue-600 hover:text-blue-900 p-2 rounded-full hover:bg-blue-50 transition-colors"
+                            title="Modifica"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => deleteVehicle(v.id)}
+                            className="text-red-600 hover:text-red-900 p-2 rounded-full hover:bg-red-50 transition-colors"
+                            title="Elimina"
+                            disabled={
+                              v.status !== "disponibile" ||
+                              v.isUnderRepair ||
+                              v.isUnderMaintenance
+                            } // Disabilita se in uso o in manutenzione
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2613,16 +4473,26 @@ const App = () => {
                       {trip.vehicleModel} ({trip.plate})
                     </p>
                   </div>
-                  {trip.rientro && (
-                    <span className="text-sm font-semibold text-green-700 bg-green-100 px-3 py-1 rounded-full">
-                      Completato
-                    </span>
-                  )}
-                  {!trip.rientro && trip.consegna && (
-                    <span className="text-sm font-semibold text-orange-700 bg-orange-100 px-3 py-1 rounded-full">
-                      In Corso
-                    </span>
-                  )}
+                  <div className="flex items-center gap-3">
+                    {trip.rientro && (
+                      <span className="text-sm font-semibold text-green-700 bg-green-100 px-3 py-1 rounded-full">
+                        Completato
+                      </span>
+                    )}
+                    {!trip.rientro && trip.consegna && (
+                      <span className="text-sm font-semibold text-orange-700 bg-orange-100 px-3 py-1 rounded-full">
+                        In Corso
+                      </span>
+                    )}
+                    {/* Pulsante Elimina Intero Trip */}
+                    <button
+                      onClick={() => deleteTrip(trip.tripId)}
+                      className="text-red-500 hover:text-red-800 p-1 rounded-full hover:bg-red-50"
+                      title="Elimina l'intero Trip (Ritiro + Riconsegna)"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2848,9 +4718,27 @@ const App = () => {
       (err) => console.error("Error logs:", err)
     );
 
+    // Nuovo Listener per le Prenotazioni (Ordina per data più vicina)
+    const qBookings = query(
+      getPublicCollectionPath("bookings"),
+      orderBy("date", "asc")
+    );
+    const unsubBookings = onSnapshot(
+      qBookings,
+      (snapshot) => {
+        const bList = snapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+        setBookings(bList);
+      },
+      (err) => console.error("Error bookings:", err)
+    );
+
     return () => {
       unsubVehicles();
       unsubLogs();
+      unsubBookings(); // Cleanup nuovo listener
     };
   }, [isAuthReady, user, authRole]);
 
@@ -2871,7 +4759,14 @@ const App = () => {
   }
 
   // 3. Mostra l'app completa (admin role)
-  const availableViews = ["dashboard", "flotta", "storico"];
+  // AGGIUNTO 'bookings' e 'danni' alla lista delle viste
+  const availableViews = [
+    "dashboard",
+    "flotta",
+    "storico",
+    "bookings",
+    "danni",
+  ];
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20 font-sans text-slate-900">
@@ -2913,7 +4808,7 @@ const App = () => {
                   : "text-slate-500 hover:bg-slate-50"
               }`}
             >
-              {t}
+              {t === "bookings" ? "Prenotazioni" : t === "danni" ? "Danni" : t}
             </button>
           ))}
         </nav>
@@ -2921,6 +4816,8 @@ const App = () => {
           {view === "dashboard" && renderDashboard()}
           {view === "flotta" && renderFleet()}
           {view === "storico" && renderHistory()}
+          {view === "bookings" && renderBookingsPage()}
+          {view === "danni" && renderDamagePage()}
         </main>
       </div>
       {renderModal()}
