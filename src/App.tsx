@@ -109,7 +109,7 @@ const loadExternalScripts = (setXlsxLoaded: (loaded: boolean) => void) => {
   if (!window.emailjs && EMAILJS_CONFIG.PUBLIC_KEY) {
     const script = document.createElement("script");
     script.src =
-      "https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js";
+      "https://cdnjs.cloudflare.com/ajax/libs/emailjs-com/2.6.4/email.min.js"; // Usiamo CDN stabile
     script.onload = () => window.emailjs.init(EMAILJS_CONFIG.PUBLIC_KEY);
     document.head.appendChild(script);
   }
@@ -395,7 +395,8 @@ const VehiclePhotoUpload = ({ imageUrl, setImageUrl, onShowToast }: any) => {
     }
   };
 
-  const removePhoto = () => {
+  // Funzione corretta per React: accetta l'indice e crea un nuovo array
+  const removePhoto = (index: number) => {
     setImageUrl(null);
   };
 
@@ -414,7 +415,7 @@ const VehiclePhotoUpload = ({ imageUrl, setImageUrl, onShowToast }: any) => {
             />
             <button
               type="button"
-              onClick={removePhoto}
+              onClick={() => setImageUrl(null)} // Usa una funzione anonima per React Child props
               className="absolute top-0 right-0 bg-red-600 text-white p-1 rounded-bl opacity-100 group-hover:opacity-100 transition-opacity"
               title="Rimuovi foto"
             >
@@ -671,7 +672,6 @@ const SignaturePad = ({
 const DamagePhotoUpload = ({ photos, setPhotos, onShowToast, label }: any) => {
   const [compressing, setCompressing] = useState(false);
 
-  // Riutilizzo la logica di compressione del codice
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -725,8 +725,11 @@ const DamagePhotoUpload = ({ photos, setPhotos, onShowToast, label }: any) => {
     }
   };
 
+  // FIX TS2322/TS7006: Definisco esplicitamente il tipo di prevPhotos come array di stringhe
   const removePhoto = (index: number) => {
-    setPhotos(photos.filter((_: any, i: number) => i !== index));
+    setPhotos((prevPhotos: string[]) =>
+      prevPhotos.filter((_: any, i: number) => i !== index)
+    );
   };
 
   return (
@@ -754,8 +757,9 @@ const DamagePhotoUpload = ({ photos, setPhotos, onShowToast, label }: any) => {
             />
             <button
               type="button"
+              // FIX TS2322: Avvolgi la chiamata in una funzione anonima che passa l'indice
               onClick={() => removePhoto(idx)}
-              className="absolute top-0 right-0 bg-red-600 text-white p-0.5 rounded-bl opacity-0 group-hover:opacity-100 transition-opacity"
+              className="absolute top-0 right-0 bg-red-600 text-white p-0.5 rounded-bl opacity-0 group-hover:opacity-100 transition-colors"
             >
               <X className="w-3 h-3" />
             </button>
@@ -784,7 +788,7 @@ const DamagePhotoUpload = ({ photos, setPhotos, onShowToast, label }: any) => {
           />
         </label>
       </div>
-      <p className="text-[10px] text-gray-400">
+      <p className="text-[10px] text-gray-400 mt-2">
         Le foto vengono compresse automaticamente.
       </p>
     </div>
@@ -1087,7 +1091,7 @@ const App = () => {
       doc.setFillColor(...RENCO_ORANGE_RGB);
       doc.rect(0, 0, pageWidth, 24, "F");
 
-      // LOGO RENCO STILIZZATO BIANCO SU ARANCIO
+      // LOGO STILIZZATO RENCO BIANCO SU ARANCIO
       doc.setTextColor(255, 255, 255);
       doc.setFontSize(20);
       // Usiamo 'helvetica' e 'bold' come font più vicino a 'Arial Black' per coerenza
@@ -1224,193 +1228,235 @@ const App = () => {
       const hasPersistentDamagesList = persistentDamages.length > 0;
       const hasNewDamagesText = !!newDamagesEntry;
 
-      doc.setTextColor(0, 0, 0);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(12);
-
-      if (hasPersistentDamagesList || hasNewDamagesText || logData.notes) {
+      // INIZIO BLOCCO GENERALE DANNI E SEGNALAZIONI (SEMPRE VISIBILE)
+      if (logData) {
+        doc.setTextColor(0, 0, 0);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(12);
         doc.text("DANNI E SEGNALAZIONI", 14, yPos);
-        yPos += 8;
-        doc.setFont("helvetica", "normal");
+        let listYPos = yPos + 8; // Inizializza listYPos sotto l'intestazione
         doc.setFontSize(10);
 
-        let listYPos = yPos;
         let lineSpacing = 6;
 
-        // 2.1 Danni Preesistenti (solo se esistono)
-        if (hasPersistentDamagesList) {
-          doc.setTextColor(150, 0, 0); // Rosso più scuro per i danni
-          doc.setFont("helvetica", "bold");
-          doc.text("Danni Preesistenti:", 14, listYPos);
-          listYPos += lineSpacing;
+        // 2.1 Danni Preesistenti
+        doc.setTextColor(150, 0, 0);
+        doc.setFont("helvetica", "bold");
+        const labelDanniPreesistenti = "Danni Preesistenti: ";
+        doc.text(labelDanniPreesistenti, 14, listYPos);
 
+        if (hasPersistentDamagesList) {
+          listYPos += lineSpacing; // Spazio verticale dopo l'etichetta
           persistentDamages.forEach((d: any) => {
             doc.setFont("helvetica", "normal");
-            doc.text(`- Trip #${d.tripId}: ${d.description}`, 14, listYPos);
-            listYPos += lineSpacing;
+            // Forza il testo dei danni preesistenti a capo per coerenza
+            const wrappedText = doc.splitTextToSize(
+              `- Trip #${d.tripId}: ${d.description}`,
+              pageWidth - 28
+            );
+            doc.text(wrappedText, 14, listYPos);
+            listYPos += wrappedText.length * lineSpacing;
           });
-          listYPos += lineSpacing / 2;
         } else {
+          doc.setFont("helvetica", "normal");
           doc.setTextColor(100, 100, 100);
-          doc.text("Danni Preesistenti: N/A", 14, listYPos);
+          listYPos += lineSpacing; // Stampa N/A sulla riga successiva
+          doc.text("N/A", 14, listYPos);
           listYPos += lineSpacing;
         }
+        // FIX P.1: Spazio dopo il blocco Danni Preesistenti
+        listYPos += lineSpacing;
 
         // 2.2 Nuovi Danni Registrati (solo se presenti nel form attuale)
-        if (hasNewDamagesText) {
-          doc.setTextColor(255, 0, 0); // Rosso vivo per i nuovi danni
-          doc.setFont("helvetica", "bold");
-          doc.text(`Nuovi Danni/Anomalie Registrate:`, 14, listYPos);
-          listYPos += lineSpacing;
 
-          doc.setFont("helvetica", "normal");
-          doc.text(newDamagesEntry, 14, listYPos);
-          listYPos += lineSpacing;
-          listYPos += lineSpacing / 2;
-        } else {
-          // Punto 1: Colorazione dinamica N/A (Rossastro chiaro)
-          doc.setTextColor(230, 120, 120); // Rosso più vivido
-          doc.setFont("helvetica", "bold"); // Rendi il testo N/A in grassetto per coerenza con gli altri titoli
-          doc.text("Nuovi Danni/Anomalie: N/A", 14, listYPos);
+        if (logData.type === "Rientro") {
+          doc.setTextColor(255, 0, 0);
+          doc.setFont("helvetica", "bold");
+          const labelNuoviDanni = `Nuovi Danni/Anomalie Registrate:`;
+          doc.text(labelNuoviDanni, 14, listYPos);
+
+          if (hasNewDamagesText) {
+            listYPos += lineSpacing;
+            doc.setFont("helvetica", "normal");
+            const wrappedText = doc.splitTextToSize(
+              newDamagesEntry,
+              pageWidth - 28
+            );
+            doc.text(wrappedText, 14, listYPos);
+            listYPos += wrappedText.length * lineSpacing;
+          } else {
+            doc.setFont("helvetica", "normal");
+            doc.setTextColor(230, 120, 120);
+            listYPos += lineSpacing;
+            doc.text("N/A", 14, listYPos);
+          }
+          // FIX P.1: Spazio dopo il blocco Nuovi Danni
           listYPos += lineSpacing;
         }
 
         // 2.3 Segnalazioni Generiche (Testo)
         doc.setTextColor(0, 0, 0);
         doc.setFont("helvetica", "bold");
-        // FIX P.3: Calcola la posizione del testo N/A per le Segnalazioni Generiche
+
         const labelNotes = "Segnalazioni Generiche: ";
-        const textNotes = logData.notes || "N/A";
-
         doc.text(labelNotes, 14, listYPos);
-        doc.setFont("helvetica", "normal");
-        doc.text(textNotes, 14 + doc.getTextWidth(labelNotes), listYPos, {
-          maxWidth: pageWidth - 14 - doc.getTextWidth(labelNotes),
-        }); // Mantiene il testo sulla stessa linea
 
+        const textNotes =
+          logData.notes && logData.notes.trim().length > 0
+            ? logData.notes
+            : "N/A";
+
+        // Stampa il valore sempre sulla riga successiva
         listYPos += lineSpacing;
+        doc.setFont("helvetica", "normal");
+        const wrappedTextNotes = doc.splitTextToSize(textNotes, pageWidth - 28);
+        doc.text(wrappedTextNotes, 14, listYPos);
+        listYPos += wrappedTextNotes.length * lineSpacing;
 
         yPos = listYPos + 4;
-      }
 
-      // --- 3. FOTO: Danni Preesistenti (Da Veicolo) ---
-      const existingDamagePhotos = safeArray(logData.existingDamagePhotos);
-      if (existingDamagePhotos.length > 0) {
-        if (yPos > 240) {
-          doc.addPage();
-          yPos = 20;
-        }
+        // --- FINE STAMPA SEZIONE TESTO ---
 
-        doc.setTextColor(0, 0, 0);
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(12);
-        doc.text("FOTO DANNI PREESISTENTI", 14, yPos);
-        yPos += 8;
-
-        let xOffset = 14;
-        const photoWidth = 50;
-        const photoHeight = 50;
-
-        existingDamagePhotos.forEach((photo: string) => {
-          if (xOffset + photoWidth > pageWidth - 14) {
-            xOffset = 14;
-            yPos += photoHeight + 5;
-          }
-          if (yPos + photoHeight > 270) {
+        // --- 3. FOTO: Danni Preesistenti (Da Veicolo) ---
+        const existingDamagePhotos = safeArray(logData.existingDamagePhotos);
+        if (existingDamagePhotos.length > 0) {
+          if (yPos > 240) {
             doc.addPage();
             yPos = 20;
-            xOffset = 14;
           }
 
-          try {
-            doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
-            xOffset += photoWidth + 5;
-          } catch (e) {
-            console.warn(
-              "Errore aggiunta immagine danno preesistente al PDF",
-              e
-            );
-          }
-        });
-        yPos += photoHeight + 10;
-      }
+          doc.setTextColor(0, 0, 0);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(12);
+          doc.text("FOTO DANNI PREESISTENTI", 14, yPos);
+          yPos += 8;
 
-      // --- 4. FOTO NUOVI DANNI (DA QUESTO VERBALE) ---
-      const newDamagePhotos = safeArray(logData.newDamagePhotos);
-      if (newDamagePhotos.length > 0) {
-        if (yPos > 240) {
-          doc.addPage();
-          yPos = 20;
+          let xOffset = 14;
+          const photoWidth = 50;
+          const photoHeight = 50;
+
+          existingDamagePhotos.forEach((photo: string) => {
+            if (xOffset + photoWidth > pageWidth - 14) {
+              xOffset = 14;
+              yPos += photoHeight + 5;
+            }
+            if (yPos + photoHeight > 270) {
+              doc.addPage();
+              yPos = 20;
+              xOffset = 14;
+            }
+
+            try {
+              doc.addImage(
+                photo,
+                "JPEG",
+                xOffset,
+                yPos,
+                photoWidth,
+                photoHeight
+              );
+              xOffset += photoWidth + 5;
+            } catch (e) {
+              console.warn(
+                "Errore aggiunta immagine danno preesistente al PDF",
+                e
+              );
+            }
+          });
+          yPos += photoHeight + 10;
         }
 
-        doc.setTextColor(0, 0, 0);
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(12);
-        doc.text("FOTO NUOVI DANNI", 14, yPos);
-        yPos += 8;
-
-        let xOffset = 14;
-        const photoWidth = 50;
-        const photoHeight = 50;
-
-        newDamagePhotos.forEach((photo: string) => {
-          if (xOffset + photoWidth > pageWidth - 14) {
-            xOffset = 14;
-            yPos += photoHeight + 5;
-          }
-          if (yPos + photoHeight > 270) {
+        // --- 4. FOTO NUOVI DANNI (DA QUESTO VERBALE) ---
+        const newDamagePhotos = safeArray(logData.newDamagePhotos);
+        if (newDamagePhotos.length > 0) {
+          if (yPos > 240) {
             doc.addPage();
             yPos = 20;
-            xOffset = 14;
           }
 
-          try {
-            doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
-            xOffset += photoWidth + 5;
-          } catch (e) {
-            console.warn("Errore aggiunta immagine nuovo danno al PDF", e);
-          }
-        });
-        yPos += photoHeight + 10;
-      }
+          doc.setTextColor(0, 0, 0);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(12);
+          doc.text("FOTO NUOVI DANNI", 14, yPos);
+          yPos += 8;
 
-      // --- 5. SEZIONE FOTO SEGNALAZIONI ---
-      const signalingPhotos = safeArray(logData.signalingPhotos);
-      if (signalingPhotos.length > 0) {
-        if (yPos > 240) {
-          doc.addPage();
-          yPos = 20;
+          let xOffset = 14;
+          const photoWidth = 50;
+          const photoHeight = 50;
+
+          newDamagePhotos.forEach((photo: string) => {
+            if (xOffset + photoWidth > pageWidth - 14) {
+              xOffset = 14;
+              yPos += photoHeight + 5;
+            }
+            if (yPos + photoHeight > 270) {
+              doc.addPage();
+              yPos = 20;
+              xOffset = 14;
+            }
+
+            try {
+              doc.addImage(
+                photo,
+                "JPEG",
+                xOffset,
+                yPos,
+                photoWidth,
+                photoHeight
+              );
+              xOffset += photoWidth + 5;
+            } catch (e) {
+              console.warn("Errore aggiunta immagine nuovo danno al PDF", e);
+            }
+          });
+          yPos += photoHeight + 10;
         }
 
-        doc.setTextColor(0, 0, 0);
-        doc.setFont("helvetica", "bold");
-        doc.setFontSize(12);
-        doc.text("FOTO SEGNALAZIONI", 14, yPos);
-        yPos += 8;
-
-        let xOffset = 14;
-        const photoWidth = 50;
-        const photoHeight = 50;
-
-        signalingPhotos.forEach((photo: string) => {
-          if (xOffset + photoWidth > pageWidth - 14) {
-            xOffset = 14;
-            yPos += photoHeight + 5;
-          }
-          if (yPos + photoHeight > 270) {
+        // --- 5. SEZIONE FOTO SEGNALAZIONI ---
+        const signalingPhotos = safeArray(logData.signalingPhotos);
+        if (signalingPhotos.length > 0) {
+          if (yPos > 240) {
             doc.addPage();
             yPos = 20;
-            xOffset = 14;
           }
 
-          try {
-            doc.addImage(photo, "JPEG", xOffset, yPos, photoWidth, photoHeight);
-            xOffset += photoWidth + 5;
-          } catch (e) {
-            console.warn("Errore aggiunta immagine segnalazione al PDF", e);
-          }
-        });
-        yPos += photoHeight + 10;
+          doc.setTextColor(0, 0, 0);
+          doc.setFont("helvetica", "bold");
+          doc.setFontSize(12);
+          doc.text("FOTO SEGNALAZIONI", 14, yPos);
+          yPos += 8;
+
+          let xOffset = 14;
+          const photoWidth = 50;
+          const photoHeight = 50;
+
+          signalingPhotos.forEach((photo: string) => {
+            if (xOffset + photoWidth > pageWidth - 14) {
+              xOffset = 14;
+              yPos += photoHeight + 5;
+            }
+            if (yPos + photoHeight > 270) {
+              doc.addPage();
+              yPos = 20;
+              xOffset = 14;
+            }
+
+            try {
+              doc.addImage(
+                photo,
+                "JPEG",
+                xOffset,
+                yPos,
+                photoWidth,
+                photoHeight
+              );
+              xOffset += photoWidth + 5;
+            } catch (e) {
+              console.warn("Errore aggiunta immagine segnalazione al PDF", e);
+            }
+          });
+          yPos += photoHeight + 10;
+        }
       }
 
       // Sezione Firma
@@ -1626,13 +1672,19 @@ const App = () => {
     setSelectedVehicle(data);
 
     if (data) {
-      // FIX P.2: Aggiorna la checklist per riflettere le dotazioni mancanti all'ultimo rientro
-      const missingItems = safeArray(data.missingChecklistItems);
       const newChecklist = { ...initialChecklist };
 
-      if (data.status === "disponibile" && missingItems.length > 0) {
+      if (data.status === "disponibile") {
+        // Se disponibile (sto facendo una CONSEGNA), applico la logica delle dotazioni mancanti del rientro precedente
+        const missingItems = safeArray(data.missingChecklistItems);
         missingItems.forEach((id) => {
           newChecklist[id] = false; // Spunta come mancante
+        });
+      } else if (data.status === "impegnato" && data.deliveryChecklist) {
+        // FIX P.2: Se impegnato (e sto facendo un RIENTRO), la checklist di default è quella dell'ultima CONSEGNA
+        CHECKLIST_ITEMS.forEach((item) => {
+          // Qui carichiamo lo stato EFFETTIVO al momento della consegna precedente
+          newChecklist[item.id] = data.deliveryChecklist[item.id] === true;
         });
       }
       setChecklist(newChecklist);
@@ -2308,7 +2360,7 @@ const App = () => {
 
         // Validazione CONFLITTO DATA INSERITA (Controlla se la data inserita è in conflitto con la prima prenotazione futura)
         if (formData.returnDate) {
-          // Escludi la prenotazione che si sta per iniziare (solo se selectedBooking esiste).
+          // Escludi la prenotazione che si sta per iniziare (only if selectedBooking exists).
           const excludeBookingId = selectedBooking?.id || null;
           const otherBookings = bookings.filter(
             (b) => b.id !== excludeBookingId
@@ -2446,7 +2498,7 @@ const App = () => {
         selectedVehicle.id
       );
 
-      // FIX PUNTO 2: La variabile deve essere inizializzata all'inizio
+      // FIX PUNTO 2: La variabile updatedMissingChecklist deve essere inizializzata all'inizio
       let updatedMissingChecklist = vehicleMissingChecklist;
 
       // AGGIORNAMENTO DOTAZIONI MANCANTI
@@ -2476,6 +2528,12 @@ const App = () => {
         persistentDamages: newPersistentDamages,
         // Aggiorna il set totale delle foto persistenti sul veicolo
         damagePhotos: Array.from(newDamagePhotosSet),
+
+        // Checklist di consegna (per confronto al rientro successivo)
+        deliveryChecklist:
+          modalMode === "checkout"
+            ? checklist
+            : selectedVehicle.deliveryChecklist,
 
         // Manteniamo lo stato di Riparazione/Manutenzione
         isUnderRepair: selectedVehicle.isUnderRepair,
@@ -2814,7 +2872,7 @@ const App = () => {
               setFormData({ ...formData, damages: e.target.value })
             }
             placeholder={placeholderText}
-          />
+          ></textarea>
         </div>
 
         {/* 2. FOTO DANNI (Persistenti) */}
@@ -2916,7 +2974,7 @@ const App = () => {
                   onClick={closeModal}
                   className="p-1 rounded-full hover:bg-gray-100 text-gray-500 hover:text-gray-900"
                 >
-                  <X className="w-6 h-6" />
+                  X
                 </button>
               </div>
 
@@ -3294,7 +3352,7 @@ const App = () => {
                   onClick={closeModal}
                   className="p-1 rounded-full hover:bg-gray-100 text-gray-500 hover:text-gray-900"
                 >
-                  <X className="w-6 h-6" />
+                  X
                 </button>
               </div>
 
@@ -3415,7 +3473,7 @@ const App = () => {
 
     // 2. Dati Mezzi Fuori (Non da Prenotazione con Data Rientro Prevista)
     const nonBookedEngagedVehicles = vehicles
-      // Includi SOLO mezzi impegnati SENZA prenotazione associata E con un RIENTRO PREVISTO NON NULLO (non fittizio)
+      // Includi SOLO mezzi impegnati SENZA prenotazione associata E con un RIENTRO PREVISTO NON NULLO (not fittizio)
       .filter(
         (v) =>
           v.status === "impegnato" &&
@@ -3606,22 +3664,15 @@ const App = () => {
             {damagedVehicles.map((v) => {
               const isCurrentlyUnderRepair =
                 v.status === "manutenzione" && v.isUnderRepair;
-              const isCurrentlyUnderMaintenance =
-                v.status === "manutenzione" && v.isUnderMaintenance;
 
               // Stato pulsanti
               const repairDisabled =
                 v.status !== "disponibile" && !isCurrentlyUnderRepair;
-              const maintenanceDisabled =
-                v.status !== "disponibile" && !isCurrentlyUnderMaintenance;
 
               // FIX: Solo Ripristino (Riparazione Danni) rimane
               const buttonTextRipristino = isCurrentlyUnderRepair
                 ? "Termina Ripristino"
                 : "Inizia Ripristino";
-              const buttonTextManutenzione = isCurrentlyUnderMaintenance
-                ? "Termina Manutenzione"
-                : "Inizia Manutenzione";
 
               return (
                 <Card key={v.id} className="p-4 space-y-4">
@@ -3654,7 +3705,7 @@ const App = () => {
                             <p className="font-semibold text-sm text-red-700">
                               Danno # {index + 1} (Trip ID: #{damage.tripId})
                             </p>
-                            <p className="text-sm text-gray-700">
+                            <p className="text-xs text-gray-700">
                               {damage.description}
                             </p>
                           </div>
@@ -3688,7 +3739,9 @@ const App = () => {
                     </div>
                   )}
 
-                  <div className="pt-3 border-t grid grid-cols-2 gap-3">
+                  <div className="pt-3 border-t">
+                    {" "}
+                    {/* Rimosso grid cols 2 */}
                     {/* 1. PULSANTE RIPRISTINO (Cancella danni) */}
                     <Button
                       variant={isCurrentlyUnderRepair ? "success" : "admin"}
@@ -3706,20 +3759,10 @@ const App = () => {
                           ? "Mezzo non disponibile per iniziare il Ripristino."
                           : ""
                       }
+                      className="w-full"
                     >
                       {buttonTextRipristino}
                     </Button>
-
-                    {/* 2. PULSANTE MANUTENZIONE (Non cancella danni) */}
-                    {/* RIMOSSO QUESTO BLOCCO DALLA PAGINA DANNI - SOLO FLOTTA */}
-                    {/* <Button 
-                                        variant={isCurrentlyUnderMaintenance ? "success" : "maintenance"}
-                                        onClick={() => repairVehicle(v, isCurrentlyUnderMaintenance ? 'end_maintenance' : 'start_maintenance')}
-                                        disabled={maintenanceDisabled && !isCurrentlyUnderMaintenance}
-                                        title={maintenanceDisabled ? "Mezzo non disponibile per iniziare la manutenzione." : ""}
-                                    >
-                                        {buttonTextManutenzione}
-                                    </Button> */}
                   </div>
                 </Card>
               );
@@ -3943,10 +3986,10 @@ const App = () => {
                       // PULSANTE CONSEGNA DIRETTA (al posto di Inizia in)
                       <button
                         onClick={() => openModal("book_checkout", b)}
-                        className={`text-xs font-medium flex items-center gap-1 ${
+                        className={`p-2 rounded-full transition-colors ${
                           isConsegnaDisabled
                             ? "text-gray-400 cursor-not-allowed"
-                            : "text-red-600 hover:text-red-800"
+                            : "text-red-600 hover:text-red-900 hover:bg-red-50"
                         }`}
                         disabled={isConsegnaDisabled}
                         title={
@@ -3955,7 +3998,7 @@ const App = () => {
                             : "Inizia Consegna (Checkout)"
                         }
                       >
-                        <ArrowRight className="w-3 h-3" /> Consegna
+                        <ArrowRight className="w-4 h-4" /> Consegna
                       </button>
                     )}
                   </div>
@@ -4369,6 +4412,7 @@ const App = () => {
     const groupedLogs = filteredLogs.reduce(
       (acc: { [key: string]: any[] }, log: any) => {
         const tid = log.tripId || "LEGACY";
+        // FIX TS2304: Dichiarazione e utilizzo corretti di 'trips'
         if (!acc[tid]) {
           acc[tid] = [];
         }
@@ -4787,7 +4831,7 @@ const App = () => {
           </div>
           <button
             onClick={handleLogout}
-            className="text-sm text-white/80 hover:text-white flex items-center gap-2 transition-colors shrink-0"
+            className="text-sm text-white/80 hover:text-white flex items-center gap-1 transition-colors shrink-0"
           >
             <LogIn className="w-4 h-4 rotate-180" /> Esci
           </button>
